@@ -132,10 +132,29 @@ for sym in \
 	CONFIG_NF_NAT CONFIG_NF_TABLES CONFIG_NETFILTER_XT_TARGET_MASQUERADE \
 	CONFIG_IP6_NF_NAT CONFIG_IP6_NF_TARGET_MASQUERADE CONFIG_MACVLAN \
 	CONFIG_USER_NS CONFIG_FUSE_FS CONFIG_TUN CONFIG_EXT4_FS \
-	CONFIG_KSU CONFIG_KPROBES
+	CONFIG_KSU
 do
 	check_cfg "$sym" y
 done
+
+# KernelSU hook mode. The legacy Kconfig offers a choice; setup-kernel.sh wrote
+# the symbol matching KSU_HOOK_MODE (kprobe | syscall_table). Verifying it here
+# matters because a silently dropped symbol means a kernel that boots without
+# working root -- the hardest kind of failure to notice before flashing.
+KSU_HOOK_MODE="${KSU_HOOK_MODE:-kprobe}"
+echo "    --- KernelSU hook mode: $KSU_HOOK_MODE ---"
+case "$KSU_HOOK_MODE" in
+kprobe)
+	check_cfg CONFIG_KPROBES y
+	check_cfg CONFIG_KSU_KPROBES_HOOK y
+	;;
+syscall_table)
+	check_cfg CONFIG_KSU_SYSCALL_TABLE_HOOK y
+	;;
+*)
+	echo "    UNKNOWN KSU_HOOK_MODE '$KSU_HOOK_MODE' (expected kprobe or syscall_table)"
+	;;
+esac
 
 # SUSFS symbols only exist when SUSFS was actually applied.
 if grep -q '^CONFIG_KSU_SUSFS' out/.config 2>/dev/null; then
