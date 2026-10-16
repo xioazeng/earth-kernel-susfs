@@ -102,18 +102,23 @@ CONFIG_NF_NAT_FTP=y
 CONFIG_NF_CONNTRACK_TFTP=y
 CONFIG_NF_NAT_TFTP=y
 
-# ---- IPv6 NAT (NAT66); optional but enabled for completeness ---------------
+# ---- IPv6 NAT (NAT66): DISABLED on purpose --------------------------------
+# The vendor VINTF matrix for this device (compatibility_matrix.6.xml, kernel
+# 4.19.191) requires CONFIG_IP6_NF_NAT=n. Leaving it on makes Android show
+# "There's an internal problem with your device..." at every boot. Droidspaces
+# does not need IPv6 NAT (it needs IPv6 REJECT + IPv4 MASQUERADE, both kept).
 CONFIG_IPV6=y
 CONFIG_IPV6_MULTIPLE_TABLES=y
 CONFIG_IP6_NF_IPTABLES=y
 CONFIG_IP6_NF_FILTER=y
 CONFIG_IP6_NF_MANGLE=y
-CONFIG_IP6_NF_NAT=y
-CONFIG_IP6_NF_TARGET_MASQUERADE=y
+# CONFIG_IP6_NF_NAT is not set
+# CONFIG_IP6_NF_TARGET_MASQUERADE is not set
 
 # ---- legacy compat IPv6 ----------------------------------------------------
 # NF_CONNTRACK_IPV6 does not exist in 4.19 (removed upstream).
-CONFIG_NF_NAT_IPV6=y
+# NF_NAT_IPV6 selects IP6_NF_NAT, so it must stay off too (see above).
+# CONFIG_NF_NAT_IPV6 is not set
 
 # ---- Macvlan mode (--net=macvlan) ------------------------------------------
 CONFIG_MACVLAN=y
@@ -161,3 +166,19 @@ CONFIG_NETFILTER_XT_SET=y
 CONFIG_NETFILTER_NETLINK_QUEUE=y
 CONFIG_NETFILTER_NETLINK_LOG=y
 CONFIG_NETFILTER_XT_TARGET_NFLOG=y
+
+# --- vendor FCM (VINTF) requirements ----------------------------------------
+# Android checks the running kernel's config (/proc/config.gz) against
+# /system/etc/vintf/compatibility_matrix.6.xml, section <kernel version="4.19.191">.
+# ANY mismatch makes every boot show the dialog
+#   "There's an internal problem with your device. Contact your manufacturer
+#    for details."   (Chinese ROMs show the localized text)
+# Verified against this device's matrix: exactly three entries differ from what
+# the vendor expects, and all three are handled here / by setup-kernel.sh:
+#   CONFIG_SYSVIPC must be n         -> the line below (AOSP's android-base.config
+#                                       asks for the same; some custom kernels
+#                                       ship it as y, which is why they also pop
+#                                       this dialog)
+#   CONFIG_IP6_NF_NAT must be n      -> handled in the IPv6 NAT section above
+#   CONFIG_TRACE_GPU_MEM must be y   -> driver vendored by scripts/setup-kernel.sh
+# CONFIG_SYSVIPC is not set
