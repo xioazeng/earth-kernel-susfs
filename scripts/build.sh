@@ -153,24 +153,11 @@ else
 	echo "            IP_NF_TARGET_MASQUERADE, NF_NAT_MASQUERADE_IPV4 is enabled"
 fi
 
-# KernelSU hook mode. The legacy Kconfig offers a choice; setup-kernel.sh wrote
-# the symbol matching KSU_HOOK_MODE (kprobe | syscall_table). Verifying it here
-# matters because a silently dropped symbol means a kernel that boots without
-# working root -- the hardest kind of failure to notice before flashing.
-KSU_HOOK_MODE="${KSU_HOOK_MODE:-kprobe}"
-echo "    --- KernelSU hook mode: $KSU_HOOK_MODE ---"
-case "$KSU_HOOK_MODE" in
-kprobe)
-	check_cfg CONFIG_KPROBES y
-	check_cfg CONFIG_KSU_KPROBES_HOOK y
-	;;
-syscall_table)
-	check_cfg CONFIG_KSU_SYSCALL_TABLE_HOOK y
-	;;
-*)
-	echo "    UNKNOWN KSU_HOOK_MODE '$KSU_HOOK_MODE' (expected kprobe or syscall_table)"
-	;;
-esac
+# KernelSU hooks: this KSU generation has no hook-mode Kconfig choice -- it uses
+# kprobes plus LSM hooks, so CONFIG_KPROBES is the only thing to verify here.
+# Whether root *hiding* works is decided by the SUSFS switches further down.
+echo "    --- KernelSU hooks (kprobes + LSM) ---"
+check_cfg CONFIG_KPROBES y
 
 # SUSFS symbols only exist when SUSFS was actually applied.
 if grep -q '^CONFIG_KSU_SUSFS' out/.config 2>/dev/null; then
