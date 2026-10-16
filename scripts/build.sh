@@ -129,13 +129,29 @@ for sym in \
 	CONFIG_SYSVIPC CONFIG_POSIX_MQUEUE CONFIG_SECCOMP CONFIG_SECCOMP_FILTER \
 	CONFIG_CGROUPS CONFIG_CGROUP_DEVICE CONFIG_MEMCG CONFIG_CFS_BANDWIDTH \
 	CONFIG_CGROUP_PIDS CONFIG_DEVTMPFS CONFIG_OVERLAY_FS CONFIG_VETH CONFIG_BRIDGE \
-	CONFIG_NF_NAT CONFIG_NF_TABLES CONFIG_NETFILTER_XT_TARGET_MASQUERADE \
+	CONFIG_NF_NAT CONFIG_NF_TABLES \
 	CONFIG_IP6_NF_NAT CONFIG_IP6_NF_TARGET_MASQUERADE CONFIG_MACVLAN \
 	CONFIG_USER_NS CONFIG_FUSE_FS CONFIG_TUN CONFIG_EXT4_FS \
 	CONFIG_KSU
 do
 	check_cfg "$sym" y
 done
+
+# IPv4 MASQUERADE: the symbol name depends on the kernel generation.
+# Modern trees have NETFILTER_XT_TARGET_MASQUERADE; this 4.19 MTK tree only
+# carries the iptables-era IP_NF_TARGET_MASQUERADE, which selects
+# NF_NAT_MASQUERADE_IPV4. Checking only the modern name reports a bogus
+# "MISSING" on a config that is in fact fine, so accept any of the three.
+if grep -q '^CONFIG_NETFILTER_XT_TARGET_MASQUERADE=y' out/.config; then
+	echo "    OK      CONFIG_NETFILTER_XT_TARGET_MASQUERADE=y"
+elif grep -q '^CONFIG_IP_NF_TARGET_MASQUERADE=y' out/.config; then
+	echo "    OK      CONFIG_IP_NF_TARGET_MASQUERADE=y (this tree's name for the MASQUERADE target)"
+elif grep -q '^CONFIG_NF_NAT_MASQUERADE_IPV4=y' out/.config; then
+	echo "    OK      CONFIG_NF_NAT_MASQUERADE_IPV4=y (MASQUERADE support present)"
+else
+	echo "    MISSING IPv4 MASQUERADE support: none of NETFILTER_XT_TARGET_MASQUERADE,"
+	echo "            IP_NF_TARGET_MASQUERADE, NF_NAT_MASQUERADE_IPV4 is enabled"
+fi
 
 # KernelSU hook mode. The legacy Kconfig offers a choice; setup-kernel.sh wrote
 # the symbol matching KSU_HOOK_MODE (kprobe | syscall_table). Verifying it here
@@ -181,6 +197,47 @@ echo
 echo "[i] key kernel version / preempt settings:"
 grep -E '^CONFIG_(LOCALVERSION|PREEMPT|MODVERSIONS|MTK_FPSGO)' out/.config | sed 's/^/    /' || true
 echo
+
+# ---------------------------------------------------------------------------
+# run_make: stream output live (tee) AND keep a copy for the failure summary.
+#
+# Defined here (not further down) because step 1b below uses it too.
+#
+# An earlier revision redirected make entirely into a file and only printed
+# the tail once make returned. For a 30-45 minute kernel build that made the
+# CI log look completely frozen after the "=== make ===" banner, which is
+# indistinguishable from a hang. tee keeps both properties.
+# ---------------------------------------------------------------------------
+BUILD_ERRLOG="$KERNEL_ROOT/build-error.log"
+: >"$BUILD_ERRLOG"
+
+run_make() {
+	echo
+	echo "=== make ${MAKE_ARGS[*]} $* ===" | tee -a "$BUILD_ERRLOG"
+	echo "=== started $(date -u +%H:%M:%S) ===" | tee -a "$BUILD_ERRLOG"
+	if command -v stdbuf >/dev/null 2>&1; then
+		stdbuf -oL -eL make "${MAKE_ARGS[@]}" "$@" 2>&1 | tee -a "$BUILD_ERRLOG"
+		STATUS=${PIPESTATUS[0]}
+	else
+		make "${MAKE_ARGS[@]}" "$@" 2>&1 | tee -a "$BUILD_ERRLOG"
+		STATUS=${PIPESTATUS[0]}
+	fi
+	echo "=== finished $(date -u +%H:%M:%S) (status $STATUS) ===" | tee -a "$BUILD_ERRLOG"
+	if [ "$STATUS" -ne 0 ]; then
+		echo
+		echo "############################################################"
+		echo " make FAILED: make ${MAKE_ARGS[*]} $*"
+		echo " exit status: $STATUS"
+		echo " last 60 lines of output:"
+		echo "############################################################"
+		tail -n 60 "$BUILD_ERRLOG"
+		echo "############################################################"
+		echo " full output saved to build-error.log"
+		echo "############################################################"
+		exit "$STATUS"
+	fi
+	tail -n 5 "$BUILD_ERRLOG"
+}
 
 # ---------------------------------------------------------------------------
 # 1b) Apply KernelSU's kernel-tree patches BEFORE the first C file is compiled.
@@ -259,43 +316,8 @@ WATCHDOG_PID=$!
 trap 'kill "$WATCHDOG_PID" 2>/dev/null || true' EXIT
 
 # ---------------------------------------------------------------------------
-# run_make: stream output live (tee) AND keep a copy for the failure summary.
-#
-# An earlier revision redirected make entirely into a file and only printed
-# the tail once make returned. For a 30-45 minute kernel build that made the
-# CI log look completely frozen after the "=== make ===" banner, which is
-# indistinguishable from a hang. tee keeps both properties.
+# run_make() is defined above, before step 1b (which needs it too).
 # ---------------------------------------------------------------------------
-BUILD_ERRLOG="$KERNEL_ROOT/build-error.log"
-: >"$BUILD_ERRLOG"
-
-run_make() {
-	echo
-	echo "=== make ${MAKE_ARGS[*]} $* ===" | tee -a "$BUILD_ERRLOG"
-	echo "=== started $(date -u +%H:%M:%S) ===" | tee -a "$BUILD_ERRLOG"
-	if command -v stdbuf >/dev/null 2>&1; then
-		stdbuf -oL -eL make "${MAKE_ARGS[@]}" "$@" 2>&1 | tee -a "$BUILD_ERRLOG"
-		STATUS=${PIPESTATUS[0]}
-	else
-		make "${MAKE_ARGS[@]}" "$@" 2>&1 | tee -a "$BUILD_ERRLOG"
-		STATUS=${PIPESTATUS[0]}
-	fi
-	echo "=== finished $(date -u +%H:%M:%S) (status $STATUS) ===" | tee -a "$BUILD_ERRLOG"
-	if [ "$STATUS" -ne 0 ]; then
-		echo
-		echo "############################################################"
-		echo " make FAILED: make ${MAKE_ARGS[*]} $*"
-		echo " exit status: $STATUS"
-		echo " last 60 lines of output:"
-		echo "############################################################"
-		tail -n 60 "$BUILD_ERRLOG"
-		echo "############################################################"
-		echo " full output saved to build-error.log"
-		echo "############################################################"
-		exit "$STATUS"
-	fi
-	tail -n 5 "$BUILD_ERRLOG"
-}
 
 # dtbs first: the appended-DTB image target depends on them.
 run_make -j"$JOBS" dtbs
