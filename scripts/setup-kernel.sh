@@ -41,17 +41,24 @@ KERNEL_ROOT="$(cd "$KERNEL_ROOT" && pwd)"
 #     marks KernelSU-Next "Not Supported" for SUSFS and lists 4.19 + SuSFS as
 #     working with the SUSFS-native forks instead.
 #
-# rsuntk/KernelSU branch `susfs-rksu-master` is one of those: an old-layout
-# KernelSU (= the layout the susfs4ksu kernel-4.19 patches expect) with the
-# whole SUSFS plumbing already inside:
-#     kernel/Kconfig      -> the KSU_SUSFS* menu
-#     kernel/supercalls.c -> every CMD_SUSFS_* handler
-#     kernel/Makefile     -> non-GKI backports (path_umount, seccomp filter_count)
-#   so no KSU-side patch has to be ported at all. Only the *kernel-side* SUSFS
-#   patch from susfs4ksu is still needed (fs/susfs.c + fs/* hooks), which is
-#   what the SUSFS flow below applies.
+# rsuntk/KernelSU branch `deprecated/susfs-legacy` is the one that MATCHES the
+# frozen 4.19 SUSFS line (v1.5.5):
+#   * old KernelSU layout (core_hook.c, ksu.c, ksud.c, allowlist.c, sucompat.c)
+#     = what the classic susfs4ksu design expects, and its SUSFS command
+#     handlers live in kernel/core_hook.c;
+#   * kernel/Kconfig carries the full classic SUSFS menu, including
+#     KSU_SUSFS_HAS_MAGIC_MOUNT / KSU_SUSFS_AUTO_ADD_* / KSU_SUSFS_SUS_OVERLAYFS;
+#   * kernel/Makefile already does the non-GKI backports (path_umount, seccomp
+#     filter_count) and requires fs/susfs.c;
+#   * KSU_VERSION 12311 = the KernelSU generation SUSFS 4.19 was written for.
+#
+# Why not the newer `susfs-rksu-master`: it tracks SUSFS 2.x, and a symbol-by-
+# symbol comparison against the 4.19 SUSFS headers leaves 13 undefined functions
+# (susfs_add_sus_map, susfs_set_avc_log_spoofing, susfs_add_sus_path_loop,
+# susfs_set_current_proc_umounted, ...) because there is no SUSFS 2.x branch for
+# 4.19 at all. `deprecated/susfs-legacy` leaves 0.
 KSU_REPO="${KSU_REPO:-https://github.com/rsuntk/KernelSU.git}"
-KSU_REF="${KSU_REF:-susfs-rksu-master}"
+KSU_REF="${KSU_REF:-deprecated/susfs-legacy}"
 
 # KernelSU hooks: this layout has no hook-mode Kconfig choice -- it uses the
 # kernel's kprobes (CONFIG_KPROBES) plus LSM hooks, which is what 4.19 needs.
@@ -170,16 +177,20 @@ KSU_SUSFS_OK=1
 if ! grep -q 'config KSU_SUSFS$' "$KSU_DIR/kernel/Kconfig" 2>/dev/null; then
 	KSU_SUSFS_OK=0
 fi
-if ! grep -q 'CMD_SUSFS_ADD_SUS_PATH' "$KSU_DIR/kernel/supercalls.c" 2>/dev/null; then
+# The command handlers moved between generations (core_hook.c here, supercalls.c
+# in the newer SUSFS-2.x branches), so search the whole kernel tree.
+if ! grep -rqs 'CMD_SUSFS_ADD_SUS_PATH' "$KSU_DIR/kernel" 2>/dev/null; then
 	KSU_SUSFS_OK=0
 fi
 if [ "$KSU_SUSFS_OK" -eq 1 ]; then
-	echo "   -> SUSFS plumbing confirmed (Kconfig menu + CMD_SUSFS_* in supercalls.c)"
+	echo "   -> SUSFS plumbing confirmed (Kconfig menu + CMD_SUSFS_* handlers)"
 else
 	fail_critical "ref '$KSU_REF' has no built-in SUSFS plumbing."
-	echo "      Expected a SUSFS-native branch, e.g. rsuntk/KernelSU @ susfs-rksu-master"
-	echo "      (kernel/Kconfig: 'config KSU_SUSFS', kernel/supercalls.c: CMD_SUSFS_*)."
-	echo "      KernelSU-Next has no non-GKI SUSFS: its own support is a GKI/LKM module."
+	echo "      Expected a SUSFS-native branch whose command set matches the"
+	echo "      frozen 4.19 SUSFS line (v1.5.5), e.g. rsuntk/KernelSU"
+	echo "      'deprecated/susfs-legacy' (kernel/Kconfig: 'config KSU_SUSFS',"
+	echo "      kernel/core_hook.c: CMD_SUSFS_*). Branches tracking SUSFS 2.x"
+	echo "      (e.g. susfs-rksu-master) call functions 4.19 does not provide."
 fi
 
 # -----------------------------------------------------------------------------
@@ -325,15 +336,14 @@ SUSFS_ENABLE="${SUSFS_ENABLE:-1}"
 
 if [ "$SUSFS_ENABLE" != "1" ]; then
 	echo "[2/4] SUSFS - SKIPPED (SUSFS_ENABLE=$SUSFS_ENABLE)"
-	# This KSU fork refuses to build without the kernel-side SUSFS: its
-	# kernel/Makefile contains
-	#     $(error -- You have not integrated susfs in your kernel yet ...)
-	# when fs/susfs.c is absent. Failing here with that reason beats letting
-	# make die with a one-line error later on.
-	if grep -q 'You have not integrated susfs in your kernel yet' "$KSU_DIR/kernel/Makefile" 2>/dev/null; then
+	# This KSU generation only builds with the kernel-side SUSFS: core_hook.c
+	# includes <linux/susfs.h> and calls susfs_* directly, so skipping SUSFS
+	# means a wall of "implicit declaration" errors. Fail here with the reason
+	# instead of letting the KSU compile die later.
+	if grep -rqs 'linux/susfs\.h\|linux/susfs_def\.h' "$KSU_DIR/kernel" 2>/dev/null; then
 		fail_critical "KSU_REF '$KSU_REF' requires the SUSFS kernel-side patch."
-		echo "      Its kernel/Makefile aborts when fs/susfs.c is absent, so"
-		echo "      SUSFS_ENABLE=1 is mandatory with this KernelSU source."
+		echo "      Its sources include <linux/susfs.h>, so SUSFS_ENABLE=1 is"
+		echo "      mandatory with this KernelSU source."
 		echo "      For a root-only build, point KSU_REF at a non-SUSFS KernelSU."
 	else
 		echo "   -> building KernelSU without SUSFS"
@@ -607,9 +617,10 @@ else
 		cat <<'EOF'
 
 # >>> earth-ksu-susfs >>>
-# KernelSU (SUSFS-native fork, old layout / non-GKI)
+# KernelSU (SUSFS-era generation, old layout / non-GKI)
 CONFIG_KSU=y
-# No hook-mode choice in this Kconfig: hooks come from kprobes + LSM hooks.
+# Manual hooking is for GKI kernels without kprobes; we have kprobes.
+# CONFIG_KSU_MANUAL_HOOK is not set
 CONFIG_KPROBES=y
 CONFIG_KPROBE_EVENTS=y
 CONFIG_EXT4_FS=y
@@ -620,20 +631,22 @@ EOF
 	if [ "$SUSFS_ENABLE" = "1" ]; then
 		cat >>"$DEFCONFIG" <<'EOF'
 
-# SUSFS -- exactly the menu this KernelSU fork defines in kernel/Kconfig
-# (symbols such as KSU_SUSFS_AUTO_ADD_* / _HAS_MAGIC_MOUNT belong to other
-# forks and do not exist here; adding them would only add noise.)
+# SUSFS -- the classic menu this KernelSU generation defines in kernel/Kconfig
 CONFIG_KSU_SUSFS=y
 CONFIG_KSU_SUSFS_SUS_PATH=y
 CONFIG_KSU_SUSFS_SUS_MOUNT=y
+CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
 CONFIG_KSU_SUSFS_SUS_KSTAT=y
-CONFIG_KSU_SUSFS_SUS_MAP=y
+CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n
 CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
 CONFIG_KSU_SUSFS_SPOOF_UNAME=y
 CONFIG_KSU_SUSFS_ENABLE_LOG=y
 CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
 CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
 CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
 EOF
 	fi
 
