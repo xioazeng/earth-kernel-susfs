@@ -71,7 +71,7 @@ cd "$KERNEL_ROOT"
 # ---------------------------------------------------------------------------
 # 1) Configure: earth_defconfig + Droidspaces fragment
 # ---------------------------------------------------------------------------
-echo "[1/3] Generating .config"
+echo "[1/4] Generating .config"
 
 # CONFIG_DEBUG_INFO makes the compiler emit full DWARF for every object. On a
 # 7 GB runner that is the single biggest memory and time cost, and it buys
@@ -183,9 +183,60 @@ grep -E '^CONFIG_(LOCALVERSION|PREEMPT|MODVERSIONS|MTK_FPSGO)' out/.config | sed
 echo
 
 # ---------------------------------------------------------------------------
+# 1b) Apply KernelSU's kernel-tree patches BEFORE the first C file is compiled.
+#
+# KernelSU-Next's Kbuild patches the kernel tree *while it is being parsed*:
+#   fs/namespace.c        + path_umount()/can_umount()  (5.9+ backport)
+#   fs/internal.h         + the matching declaration
+#   include/linux/seccomp.h + a struct seccomp field
+#   security/selinux/*    + selinux_cred()/selinux_inode() backports
+#
+# make only parses drivers/kernelsu/Kbuild when it descends into drivers/ --
+# which, in a parallel build, is long after fs/ and security/ were compiled.
+# Consequences of that ordering (both were real in the previous run):
+#   * fs/namespace.o keeps the *unpatched* source, while KSU sees path_umount()
+#     in the header-produced flag KSU_HAS_PATH_UMOUNT and calls it, so the final
+#     link dies with:
+#         ld.lld: error: undefined symbol: path_umount
+#         >>> referenced by kernel_umount.c
+#   * objects compiled before the struct seccomp backport and objects compiled
+#     after it disagree about a kernel structure layout.
+# Parsing that one directory here -- after the tree is configured, before dtbs
+# and the image -- applies every patch up front, so the rest of the build
+# compiles one consistent tree.
+# ---------------------------------------------------------------------------
+echo "[1b/4] Applying KernelSU kernel-tree patches (before any C file is built)"
+run_make -j"$JOBS" prepare
+
+# KernelSU's sources include security/selinux headers, and flask.h /
+# av_permissions.h are *generated* by scripts/selinux/genheaders -- they only
+# appear when that directory is built. So it has to be prepared first, otherwise
+# the drivers/kernelsu step below dies on "flask.h: No such file or directory".
+run_make -j"$JOBS" security/selinux/
+
+# Now parse (and build) drivers/kernelsu. This is the step that applies the
+# patches listed above -- the Kbuild does it while make parses it -- and because
+# it happens here, fs/, security/ and everything else are still uncompiled and
+# will be built from the patched sources.
+run_make -j"$JOBS" drivers/kernelsu/
+
+if grep -q '^int path_umount' "$KERNEL_ROOT/fs/namespace.c"; then
+	echo "    OK      fs/namespace.c carries the path_umount() backport (fs/ builds it below)"
+else
+	echo "    note    fs/namespace.c has no path_umount(): KernelSU uses its ksys_umount() fallback"
+fi
+if grep -q 'atomic_t filter_count;' "$KERNEL_ROOT/include/linux/seccomp.h"; then
+	echo "    OK      struct seccomp backport present before any consumer compiles"
+fi
+if grep -q 'path_umount' "$KERNEL_ROOT/fs/internal.h"; then
+	echo "    OK      fs/internal.h declares path_umount()"
+fi
+echo
+
+# ---------------------------------------------------------------------------
 # 2) Build
 # ---------------------------------------------------------------------------
-echo "[2/3] Compiling (this takes a while)"
+echo "[2/4] Compiling (this takes a while)"
 START=$(date +%s)
 
 # ---------------------------------------------------------------------------
@@ -291,7 +342,7 @@ echo
 # ---------------------------------------------------------------------------
 # 3) Collect artifacts
 # ---------------------------------------------------------------------------
-echo "[3/3] Collecting artifacts"
+echo "[4/4] Collecting artifacts"
 DIST="$KERNEL_ROOT/dist"
 mkdir -p "$DIST"
 
