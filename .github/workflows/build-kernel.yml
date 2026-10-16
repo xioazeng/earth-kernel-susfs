@@ -3,7 +3,8 @@ name: Build earth kernel (KernelSU-Next + SUSFS + Droidspaces)
 # =============================================================================
 #  Xiaomi Redmi 12C / Poco C55  ("earth", MediaTek MT6768)
 #  Base tree : LineageOS/android_kernel_xiaomi_earth @ lineage-21  (Linux 4.19)
-#  Features  : KernelSU-Next v3.4.2 + SUSFS (kernel-4.19) + Droidspaces
+#  Features  : KernelSU-Next (legacy / non-GKI branch) + SUSFS (kernel-4.19)
+#              + Droidspaces
 #  Output    : flashable boot.img (kernel swapped inside your stock boot.img)
 #              + raw Image.gz-dtb and the full build log
 #
@@ -32,9 +33,13 @@ on:
         required: false
         default: 'earth'
       kernelsu_ref:
-        description: 'KernelSU-Next ref (tag/branch/commit)'
+        description: 'KernelSU-Next ref. Must be non-GKI: "legacy" branch or a "<ver>-legacy" tag/commit. Main-branch tags (v3.4.x) do NOT build on 4.19.'
         required: false
-        default: 'v3.4.2'
+        default: 'legacy'
+      ksu_hook:
+        description: 'KernelSU hook mode: kprobe (default) or syscall_table (use if kprobe bootloops on this device)'
+        required: false
+        default: 'kprobe'
       susfs_ref:
         description: 'SUSFS branch (susfs4ksu)'
         required: false
@@ -158,6 +163,8 @@ jobs:
         env:
           DEFCONFIG: ${{ inputs.defconfig || 'earth' }}
           SUSFS_ENABLE: ${{ inputs.susfs_enable || '0' }}
+          KSU_REF: ${{ inputs.kernelsu_ref || 'legacy' }}
+          KSU_HOOK_MODE: ${{ inputs.ksu_hook || 'kprobe' }}
         run: |
           chmod +x scripts/*.sh
           ./scripts/setup-kernel.sh "$PWD/kernel" 2>&1 | tee setup.log
@@ -169,6 +176,7 @@ jobs:
         env:
           DEFCONFIG: ${{ inputs.defconfig || 'earth' }}
           SUSFS_ENABLE: ${{ inputs.susfs_enable || '0' }}
+          KSU_HOOK_MODE: ${{ inputs.ksu_hook || 'kprobe' }}
           JOBS: ${{ inputs.jobs || '3' }}
         run: |
           # The build output streams live (see scripts/build.sh), so this step
@@ -290,8 +298,9 @@ jobs:
             echo "| kernel repo | \`${{ inputs.kernel_repo || 'LineageOS/android_kernel_xiaomi_earth' }}\` |"
             echo "| kernel ref | \`${{ inputs.kernel_ref || 'lineage-21' }}\` |"
             echo "| kernel commit | \`${KERNEL_SHA}\` |"
-            echo "| KernelSU-Next | \`${{ inputs.kernelsu_ref || 'v3.4.2' }}\` |"
-            echo "| SUSFS | \`${{ inputs.susfs_ref || 'kernel-4.19' }}\` |"
+            echo "| KernelSU-Next | \`${{ inputs.kernelsu_ref || 'legacy' }}\` (non-GKI legacy) |"
+            echo "| KSU hook mode | \`${{ inputs.ksu_hook || 'kprobe' }}\` |"
+            echo "| SUSFS | \`${{ inputs.susfs_ref || 'kernel-4.19' }}\` (enabled: \`${{ inputs.susfs_enable || '0' }}\`) |"
             echo "| clang | \`clang-r416183b\` (LineageOS prebuilt for kernel 4.19) |"
             echo "| stock boot.img | ${{ steps.bootimg.outputs.have == '1' && 'provided - boot.img will be produced' || 'not provided - raw kernel only' }} |"
             echo ""
