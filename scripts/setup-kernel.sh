@@ -8,9 +8,16 @@
 #
 #  Order matters and is deliberate:
 #    1) KernelSU-Next in "legacy" (non-GKI) mode -> provides kernel/ + drivers/kernelsu
+#       plus the 4.19 compatibility fixups described in section 1a/1b below
 #    2) SUSFS kernel-side patches                 -> requires the KSU tree from (1)
 #    3) Droidspaces non-GKI patches               -> independent kernel patches
 #    4) Droidspaces config fragment               -> merged at config time
+#
+#  Environment knobs:
+#    KSU_REF       KernelSU-Next ref to check out   (default: legacy)
+#    KSU_HOOK_MODE kprobe | syscall_table           (default: kprobe)
+#    SUSFS_ENABLE  1 | 0                            (default: 1, see section 2)
+#    DEFCONFIG     defconfig name without _defconfig (default: earth)
 # =============================================================================
 set -euo pipefail
 
@@ -18,7 +25,35 @@ KERNEL_ROOT="${1:-$(pwd)}"
 KERNEL_ROOT="$(cd "$KERNEL_ROOT" && pwd)"
 
 KSU_REPO="https://github.com/KernelSU-Next/KernelSU-Next.git"
-KSU_REF="v3.4.2"                       # latest KernelSU-Next release
+# IMPORTANT: use the `legacy` branch, not a main-branch release.
+#
+# The main-branch releases (v3.4.x) are GKI-oriented. Their kernel sources call
+# APIs that do not exist in Linux 4.19 at all:
+#     include <linux/pgtable.h>       (added in 5.8)
+#     strncpy_from_user_nofault()     (added in 5.8)
+#     TWA_RESUME                      (added in 5.8)
+#     current_user_stack_pointer()    (arm64 implementation added in 5.10)
+# Building v3.4.2 on this tree stops with:
+#     drivers/kernelsu/feature/sucompat.c:8:10: fatal error:
+#     'linux/pgtable.h' file not found
+# The `legacy` branch is the same KernelSU-Next generation ported back to
+# non-GKI/older kernels: it carries kernel/compat/ (TWA_RESUME, nofault copies,
+# path_mount/path_umount, ...) and version-guards the includes above.
+# A "<version>-legacy" tag (e.g. v3.4.0-legacy) also works and is pinnable.
+KSU_REF="${KSU_REF:-legacy}"
+
+# kprobe      : tracepoint + kretprobe hooks (upstream's non-GKI recommendation)
+# syscall_table: patch sys_call_table directly, for kernels where kprobes are
+#                unavailable or misbehave (KernelSU-Next >= 4.17 pt_regs ABI).
+KSU_HOOK_MODE="${KSU_HOOK_MODE:-kprobe}"
+case "$KSU_HOOK_MODE" in
+kprobe | syscall_table) ;;
+*)
+	echo "ERROR: KSU_HOOK_MODE must be 'kprobe' or 'syscall_table' (got '$KSU_HOOK_MODE')" >&2
+	exit 2
+	;;
+esac
+
 SUSFS_REPO="https://gitlab.com/simonpunk/susfs4ksu.git"
 SUSFS_REF="kernel-4.19"                # official 4.19 branch (non-GKI)
 
@@ -54,6 +89,7 @@ echo " earth kernel: KernelSU-Next + SUSFS + Droidspaces setup"
 echo "=============================================================="
 echo " kernel root : $KERNEL_ROOT"
 echo " KSU         : $KSU_REPO @ $KSU_REF (legacy / non-GKI mode)"
+echo " KSU hooks   : $KSU_HOOK_MODE"
 echo " SUSFS       : $SUSFS_REPO @ $SUSFS_REF"
 echo
 
@@ -91,9 +127,19 @@ if [ -d "$KSU_DIR" ]; then
 	rm -rf "$KSU_DIR"
 fi
 
-git clone --depth 1 --branch "$KSU_REF" "$KSU_REPO" "$KSU_DIR"
+if ! git clone --depth 1 --branch "$KSU_REF" "$KSU_REPO" "$KSU_DIR" 2>/dev/null; then
+	# Not a branch/tag name: treat it as a commit SHA so builds can be pinned
+	# to an exact revision (GitHub serves fetches of individual commits).
+	echo "   -> '$KSU_REF' is not a branch/tag, retrying as a commit SHA"
+	rm -rf "$KSU_DIR"
+	git clone --depth 1 "$KSU_REPO" "$KSU_DIR"
+	git -C "$KSU_DIR" fetch --depth 1 origin "$KSU_REF"
+	git -C "$KSU_DIR" checkout --detach FETCH_HEAD
+fi
 KSU_DESC=$(git -C "$KSU_DIR" describe --tags --always 2>/dev/null || echo "$KSU_REF")
-echo "   -> cloned $KSU_DESC"
+KSU_SHA=$(git -C "$KSU_DIR" rev-parse HEAD 2>/dev/null || echo unknown)
+KSU_BRANCH=$(git -C "$KSU_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo detached)
+echo "   -> cloned $KSU_DESC  (ref=$KSU_BRANCH sha=$KSU_SHA)"
 
 # The "kernel/Kconfig" file is what the SUSFS KSU-side patch expects to patch.
 if [ ! -f "$KSU_DIR/kernel/Kconfig" ]; then
@@ -102,6 +148,124 @@ if [ ! -f "$KSU_DIR/kernel/Kconfig" ]; then
 	ls -la "$KSU_DIR" | sed 's/^/      /' || true
 else
 	echo "   -> legacy layout confirmed (kernel/Kconfig present)"
+fi
+
+# -----------------------------------------------------------------------------
+# 1a) Non-GKI preflight.
+#
+# `kernel/compat/kernel_compat.h` only exists on the non-GKI (legacy) side of
+# KernelSU-Next. Without it the ref is a GKI/LKM-oriented release that cannot
+# compile against Linux 4.19 -- fail here with the real reason instead of
+# letting the build die 25 minutes later on 'linux/pgtable.h'.
+# -----------------------------------------------------------------------------
+if [ ! -f "$KSU_DIR/kernel/compat/kernel_compat.h" ]; then
+	fail_critical "ref '$KSU_REF' is GKI-oriented: kernel/compat/kernel_compat.h is missing."
+	echo "      That code uses Linux 5.8/5.10+ APIs (linux/pgtable.h, TWA_RESUME,"
+	echo "      strncpy_from_user_nofault, user_stack_pointer) and cannot build on 4.19."
+	echo "      Use KSU_REF=legacy (or a pinned '<version>-legacy' tag / commit SHA)."
+else
+	echo "   -> non-GKI compat layer confirmed (kernel/compat/kernel_compat.h)"
+fi
+
+# -----------------------------------------------------------------------------
+# 1b) Linux 4.19 compatibility fixups applied to the KernelSU sources.
+#
+#     (i)  arm64 kernels before 5.10 do not provide user_stack_pointer(), yet
+#          include/linux/ptrace.h defines current_user_stack_pointer() on top of
+#          it. feature/sucompat.c and feature/adb_root.c use it, so the build
+#          stops with "call to undeclared function 'user_stack_pointer'".
+#          Inject the upstream v5.10 arm64 implementation -- but only when the
+#          kernel tree really does not define it (verified by grep, not assumed).
+#     (ii) an unguarded "#include <linux/pgtable.h>" (the header appeared in 5.8)
+#          cannot resolve on 4.19; asm/pgtable.h is its 4.19 equivalent.
+#
+#     Both fixups are idempotent and printed, so a re-run is harmless.
+# -----------------------------------------------------------------------------
+KSU_ARCH_H="$KSU_DIR/kernel/include/arch.h"
+KSU_419_H="$KSU_DIR/kernel/include/ksu_419_compat.h"
+
+if [ -f "$KSU_ARCH_H" ]; then
+	# Look for an actual DEFINITION, not for a use: include/linux/ptrace.h on
+	# this tree defines "#define current_user_stack_pointer() \
+	# user_stack_pointer(current_pt_regs())", which mentions the name without
+	# providing it. Only "#define user_stack_pointer" or a
+	# "user_stack_pointer(struct pt_regs ..." definition counts.
+	if grep -rEqs '#define[[:space:]]+user_stack_pointer|user_stack_pointer[[:space:]]*\(struct pt_regs' \
+			"$KERNEL_ROOT/arch/arm64/include" "$KERNEL_ROOT/include" 2>/dev/null; then
+		echo "   -> user_stack_pointer() already provided by the kernel tree"
+	elif [ -f "$KSU_419_H" ]; then
+		echo "   -> arm64 user_stack_pointer() compat already injected"
+	else
+		echo "   -> injecting arm64 user_stack_pointer() compat (kernel < 5.10)"
+		cat >"$KSU_419_H" <<'EOF'
+/* ksu_419_compat.h -- injected by the earth build kit (setup-kernel.sh).
+ *
+ * arm64 kernels before 5.10 do not define user_stack_pointer(), even though
+ * include/linux/ptrace.h defines current_user_stack_pointer() in terms of it.
+ * KernelSU's feature/sucompat.c (userspace_stack_buffer) and feature/adb_root.c
+ * call it, so without this shim the module fails to compile on 4.19:
+ *     error: call to undeclared function 'user_stack_pointer'
+ *
+ * Preference order:
+ *   1. the kernel's own GET_USP() macro (present in ACK/MTK arm64 trees),
+ *   2. the upstream v5.10 implementation (compat-aware),
+ *   3. plain regs->sp as a last resort.
+ */
+#ifndef __KSU_419_COMPAT_H
+#define __KSU_419_COMPAT_H
+
+#include <linux/version.h>
+#include <asm/ptrace.h>
+
+#if defined(__aarch64__) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
+#ifndef user_stack_pointer
+#if defined(GET_USP)
+#define user_stack_pointer(regs) GET_USP(regs)
+#elif defined(compat_sp) && defined(compat_user_mode)
+static inline unsigned long user_stack_pointer(struct pt_regs *regs)
+{
+	if (compat_user_mode(regs))
+		return (unsigned long)regs->compat_sp;
+	return (unsigned long)regs->sp;
+}
+#else
+#define user_stack_pointer(regs) ((unsigned long)((regs)->sp))
+#endif
+#endif
+#endif
+
+#endif /* __KSU_419_COMPAT_H */
+EOF
+		# Appended after arch.h's closing #endif on purpose: ksu_419_compat.h
+		# carries its own include guard, so repeated inclusion is a no-op.
+		printf '\n#include "ksu_419_compat.h"\n' >>"$KSU_ARCH_H"
+		if grep -q 'ksu_419_compat.h' "$KSU_ARCH_H" && [ -f "$KSU_419_H" ]; then
+			echo "      verified: ksu_419_compat.h created and hooked into arch.h"
+		else
+			fail_critical "could not install the arm64 user_stack_pointer() compat header"
+		fi
+	fi
+else
+	fail_critical "missing $KSU_ARCH_H - unexpected KernelSU-Next layout"
+fi
+
+if [ ! -f "$KERNEL_ROOT/include/linux/pgtable.h" ]; then
+	PG_FIXED=0
+	while IFS= read -r f; do
+		[ -n "$f" ] || continue
+		# Skip includes that are already behind a LINUX_VERSION_CODE guard.
+		if grep -B3 '^#include <linux/pgtable.h>$' "$f" | grep -q 'KERNEL_VERSION'; then
+			continue
+		fi
+		sed -i 's|^#include <linux/pgtable.h>$|\/* 4.19: linux/pgtable.h is 5.8+, asm/pgtable.h is the local equivalent *\/\n#include <asm/pgtable.h>|' "$f"
+		echo "      patched $f"
+		PG_FIXED=$((PG_FIXED + 1))
+	done < <(grep -rl '^#include <linux/pgtable.h>$' "$KSU_DIR/kernel" 2>/dev/null || true)
+	if [ "$PG_FIXED" -eq 0 ]; then
+		echo "   -> no unguarded linux/pgtable.h include found (nothing to fix)"
+	else
+		echo "   -> linux/pgtable.h rewritten to asm/pgtable.h in $PG_FIXED file(s)"
+	fi
 fi
 
 # Provide the exact paths legacy setup.sh creates.
@@ -315,9 +479,22 @@ if [ "$DL_OK" -eq 1 ]; then
 	echo "   -> using vendored patches from $PATCH_DIR"
 	# These are Droidspaces compatibility fixes, unrelated to root hiding.
 	# If they do not apply, containers still work on most kernels -- not fatal.
-	apply_patch "$KERNEL_ROOT" "$PATCH_DIR/01.fix_kernel_panic_in_xt_qtaguid.patch" \
-		"xt_qtaguid kernel-panic fix" "$KERNEL_ROOT/.patch-ds-01.log" ||
+	#
+	# Patch 01 touches net/netfilter/xt_qtaguid.c. Many trees (including this
+	# LineageOS 4.19 tree) no longer ship that driver at all, in which case the
+	# patch can never apply and "No file to patch" is the expected, harmless
+	# outcome -- not a build problem. Report it as informational, not as a
+	# failure, so the log stays readable.
+	if [ ! -f "$KERNEL_ROOT/net/netfilter/xt_qtaguid.c" ]; then
+		echo "      skip: net/netfilter/xt_qtaguid.c is not in this tree"
+		echo "            (patch 01 targets trees that still ship qtaguid; nothing to fix)"
+	elif apply_patch "$KERNEL_ROOT" "$PATCH_DIR/01.fix_kernel_panic_in_xt_qtaguid.patch" \
+			"xt_qtaguid kernel-panic fix" "$KERNEL_ROOT/.patch-ds-01.log"; then
+		:
+	else
 		note_warning "Droidspaces patch 01 did not apply (non-fatal)."
+	fi
+
 	apply_patch "$KERNEL_ROOT" "$PATCH_DIR/02.fix_restore_cgroup_file_prefix_handling.patch" \
 		"cgroup prefix fix" "$KERNEL_ROOT/.patch-ds-02.log" ||
 		note_warning "Droidspaces patch 02 did not apply (non-fatal)."
@@ -342,17 +519,44 @@ else
 	# Remove any previous block so re-runs stay idempotent.
 	sed -i '/^# >>> earth-ksu-susfs >>>$/,/^# <<< earth-ksu-susfs <<<$/d' "$DEFCONFIG"
 
-	cat >>"$DEFCONFIG" <<'EOF'
+	{
+		cat <<'EOF'
 
 # >>> earth-ksu-susfs >>>
 # KernelSU-Next (non-GKI / legacy integration)
 CONFIG_KSU=y
-CONFIG_KPROBES=y
-CONFIG_KPROBE_EVENTS=y
-CONFIG_KSU_KPROBE_HOOKS=y
 CONFIG_EXT4_FS=y
 CONFIG_MODULES=y
+# CONFIG_KSU_MANUAL_HOOK is not set
 EOF
+
+		# Hook mode. The legacy Kconfig exposes a choice:
+		#   KSU_KPROBES_HOOK        tracepoint + kretprobe (upstream default,
+		#                           documented as "not below 5.10", but it is
+		#                           what non-GKI devices normally use)
+		#   KSU_SYSCALL_TABLE_HOOK  patch sys_call_table directly, for kernels
+		#                           where kprobes are unavailable/broken
+		case "$KSU_HOOK_MODE" in
+		kprobe)
+			cat <<'EOF'
+# hook mode: kprobe + tracepoint
+CONFIG_KPROBES=y
+CONFIG_KPROBE_EVENTS=y
+CONFIG_KSU_KPROBES_HOOK=y
+EOF
+			;;
+		syscall_table)
+			cat <<'EOF'
+# hook mode: direct sys_call_table patching (no kprobe needed)
+# CONFIG_KSU_KPROBES_HOOK is not set
+CONFIG_KSU_SYSCALL_TABLE_HOOK=y
+EOF
+			;;
+		*)
+			fail_critical "unknown KSU_HOOK_MODE '$KSU_HOOK_MODE' (expected: kprobe or syscall_table)" >&2
+			;;
+		esac
+	} >>"$DEFCONFIG"
 
 	if [ "$SUSFS_ENABLE" = "1" ]; then
 		cat >>"$DEFCONFIG" <<'EOF'
@@ -381,10 +585,11 @@ EOF
 EOF
 
 	if [ "$SUSFS_ENABLE" = "1" ]; then
-		echo "   -> KernelSU-Next + SUSFS switches appended to earth_defconfig"
+		echo "   -> KernelSU-Next + SUSFS switches appended to $DEFCONFIG_NAME"
 	else
-		echo "   -> KernelSU-Next switches appended (SUSFS disabled)"
+		echo "   -> KernelSU-Next switches appended to $DEFCONFIG_NAME (SUSFS disabled)"
 	fi
+	echo "   -> KernelSU hook mode: $KSU_HOOK_MODE"
 
 	# 4b) Keep the device's own local version string, but make builds
 	#     reproducible: CONFIG_LOCALVERSION_AUTO adds the git SHA/date to
