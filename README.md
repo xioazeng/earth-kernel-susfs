@@ -58,13 +58,19 @@
   3. 非 GKI 社区的多机型构建项目（NootFond/NonGKI_Kernel_Build_mix2s）把
      KernelSU-Next 标为 **"Not Supported ❌"**，它的机型表里 **4.19 + SuSFS ✅**
      用的是 SUSFS 原生分支（rsuntk、Magic 等）。
-- 所以本套件用 **`rsuntk/KernelSU` 的 `susfs-rksu-master` 分支**：它是老布局
-  KernelSU（正是 susfs4ksu `kernel-4.19` 补丁所针对的布局），而且 **SUSFS 已经
-  内建**：`kernel/Kconfig` 有全套 `KSU_SUSFS*` 菜单，`kernel/supercalls.c`
-  实现了全部 `CMD_SUSFS_*`（比冻结的 4.19 补丁还多：`ADD_SUS_MAP`、
-  `ADD_SUS_PATH_LOOP`、`SET_SDCARD_ROOT_PATH`、`ENABLE_AVC_LOG_SPOOFING` …），
-  `kernel/Makefile` 自带非 GKI 回移（`path_umount`、seccomp `filter_count`）。
+- 所以本套件用 **`rsuntk/KernelSU` 的 `deprecated/susfs-legacy` 分支**：它是老布局
+  KernelSU（正是 susfs4ksu `kernel-4.19` 补丁所针对的布局，SUSFS 命令处理在
+  `kernel/core_hook.c`），`kernel/Kconfig` 有**完整经典 SUSFS 菜单**（含
+  `KSU_SUSFS_HAS_MAGIC_MOUNT`、`KSU_SUSFS_AUTO_ADD_*`、`KSU_SUSFS_SUS_OVERLAYFS`），
+  `kernel/Makefile` 自带非 GKI 回移（`path_umount`、seccomp `filter_count`），
+  并且 `KSU_VERSION=12311` 正是 SUSFS 4.19 补丁所对应的那一代。
   **因此 KSU 侧一个 hunk 都不需要我改写。**
+- ⚠️ 不要用更新的 `susfs-rksu-master` 分支：它跟的是 **SUSFS 2.x** 的 API。
+  我做过逐符号比对——对 4.19 的 SUSFS 头文件，它调用而 4.19 不提供的有 **13 个**
+  函数（`susfs_add_sus_map`、`susfs_add_sus_path_loop`、`susfs_set_avc_log_spoofing`、
+  `susfs_set_current_proc_umounted`、`susfs_show_variant` …），而
+  **4.19 根本没有 SUSFS 2.x 分支**（4.19 线冻结在 v1.5.5）。`deprecated/susfs-legacy`
+  的这个数字是 **0**。
 - 仍然需要的是 **SUSFS 内核侧补丁**（susfs4ksu `kernel-4.19`：`fs/susfs.c`
   与 `fs/*` 里的钩子）。实测在这棵 LineageOS 树上 **69/72 hunk 直接可用**，
   剩下 3 个由 `setup-kernel.sh` 修复：`fs/proc/task_mmu.c` 的 include，
@@ -154,7 +160,7 @@ E:\Chormedownload\earth_global_images_V14.0.7.0.TCVMIXM_13.0\images\boot.img
 | `kernel_repo` | `LineageOS/android_kernel_xiaomi_earth` | 内核源码仓库 |
 | `kernel_ref` | `lineage-21` | 分支/标签 |
 | `defconfig` | `earth` | 对应 `arch/arm64/configs/earth_defconfig` |
-| `kernelsu_ref` | `susfs-rksu-master` | KernelSU ref。必须带内建 SUSFS（`rsuntk/KernelSU` 的 `susfs-rksu-master`，或同类 SUSFS 原生分支）；setup 阶段会检查 `kernel/supercalls.c` 里的 `CMD_SUSFS_*` 与 Kconfig 菜单，没有就直接报错 |
+| `kernelsu_ref` | `deprecated/susfs-legacy` | KernelSU ref。必须是**与 4.19 SUSFS（v1.5.5）API 对得上**的 SUSFS 原生分支；setup 阶段会检查 Kconfig 菜单和 `CMD_SUSFS_*` 处理函数，并对不上就报错并说明该用哪个 |
 | `susfs_ref` | `kernel-4.19` | SUSFS 分支（4.19 线的最新就是它） |
 | `susfs_enable` | `1` | 是否打 SUSFS 内核侧补丁（默认开） |
 | `jobs` | `3` | 并行编译任务数，调高更快但可能 OOM |
@@ -311,8 +317,9 @@ KernelSU-Next 的 `Kbuild` 是在 **make 解析它的时候**去改内核源码�
 ## 8. 常用调整
 
 **换 KernelSU 分支**：改 `kernelsu_ref`（默认 `susfs-rksu-master`）。
-必须是带**内建 SUSFS** 的分支——setup 阶段会检查 `kernel/supercalls.c` 里的
-`CMD_SUSFS_*` 和 `kernel/Kconfig` 的 SUSFS 菜单，没有就直接报错并说明原因。
+必须是带**内建 SUSFS** 的分支——setup 阶段会检查 Kconfig 里的 SUSFS 菜单以及
+`CMD_SUSFS_*` 处理函数（在旧布局里位于 `kernel/core_hook.c`），对不上会直接报错并
+提示该用哪个分支。
 也可以填某个 commit 的 SHA（脚本会 fetch 下来 checkout，便于复现构建）。
 
 **只想先要 root、不要 SUSFS**：这条路在当前 KSU 分支上**走不通**——
