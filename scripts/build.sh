@@ -16,6 +16,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FRAGMENT="$SCRIPT_DIR/../configs/earth-droidspaces.fragment"
 
 JOBS="${JOBS:-$(nproc)}"
+# Cap default parallelism: linking and some MTK translation units are memory
+# heavy, and exceeding runner RAM gets the job OOM-killed with no message.
+if [ "${ALLOW_HIGH_JOBS:-0}" != "1" ] && [ "$JOBS" -gt 3 ]; then
+	echo "[i] capping jobs $JOBS -> 3 (set ALLOW_HIGH_JOBS=1 to override)"
+	JOBS=3
+fi
 # DEFCONFIG is passed by the workflow (defaults to "earth" -> earth_defconfig)
 DEFCONFIG_TARGET="${DEFCONFIG:-earth}_defconfig"
 
@@ -66,6 +72,19 @@ cd "$KERNEL_ROOT"
 # 1) Configure: earth_defconfig + Droidspaces fragment
 # ---------------------------------------------------------------------------
 echo "[1/3] Generating .config"
+
+# CONFIG_DEBUG_INFO makes the compiler emit full DWARF for every object. On a
+# 7 GB runner that is the single biggest memory and time cost, and it buys
+# nothing for a kernel we are going to flash. Disable it unless explicitly
+# asked for (DEBUG_INFO=1).
+DEBUG_INFO="${DEBUG_INFO:-0}"
+if [ "$DEBUG_INFO" != "1" ]; then
+	if grep -q '^CONFIG_DEBUG_INFO=y' "$KERNEL_ROOT/arch/arm64/configs/${DEFCONFIG_TARGET}" 2>/dev/null; then
+		sed -i 's/^CONFIG_DEBUG_INFO=y$/# CONFIG_DEBUG_INFO is not set/' \
+			"$KERNEL_ROOT/arch/arm64/configs/${DEFCONFIG_TARGET}"
+		echo "[i] CONFIG_DEBUG_INFO disabled (smaller/faster build; set DEBUG_INFO=1 to keep)"
+	fi
+fi
 
 # Start from a clean output dir so stale configs cannot leak in.
 rm -rf out
@@ -150,14 +169,48 @@ echo
 echo "[2/3] Compiling (this takes a while)"
 START=$(date +%s)
 
-# Capture the real make output so a failure is self-explanatory, instead of
-# only being discoverable by digging through the whole CI log.
+# ---------------------------------------------------------------------------
+# Memory watchdog. A kernel build on a 4-core / 7 GB runner can hit OOM, and
+# when the OOM killer fires the build dies with no message at all. Log free
+# memory every 30s so any future failure has evidence attached to it.
+# ---------------------------------------------------------------------------
+FREE_LOG="$KERNEL_ROOT/memory.log"
+: >"$FREE_LOG"
+(
+	while true; do
+		# `|| true` matters: this subshell inherits `set -e` from the script,
+		# so a transient failure of free/awk would silently kill the watchdog.
+		LINE=$(free -m 2>/dev/null | awk '/Mem:/ {print "used="$3"MB free="$4"MB avail="$7"MB"}' 2>/dev/null) || LINE="free unavailable"
+		echo "[$(date -u +%H:%M:%S)] $LINE" >>"$FREE_LOG" || true
+		sleep 30
+	done
+) &
+WATCHDOG_PID=$!
+trap 'kill "$WATCHDOG_PID" 2>/dev/null || true' EXIT
+
+# ---------------------------------------------------------------------------
+# run_make: stream output live (tee) AND keep a copy for the failure summary.
+#
+# An earlier revision redirected make entirely into a file and only printed
+# the tail once make returned. For a 30-45 minute kernel build that made the
+# CI log look completely frozen after the "=== make ===" banner, which is
+# indistinguishable from a hang. tee keeps both properties.
+# ---------------------------------------------------------------------------
 BUILD_ERRLOG="$KERNEL_ROOT/build-error.log"
+: >"$BUILD_ERRLOG"
+
 run_make() {
 	echo
 	echo "=== make ${MAKE_ARGS[*]} $* ===" | tee -a "$BUILD_ERRLOG"
-	make "${MAKE_ARGS[@]}" "$@" >>"$BUILD_ERRLOG" 2>&1
-	STATUS=$?
+	echo "=== started $(date -u +%H:%M:%S) ===" | tee -a "$BUILD_ERRLOG"
+	if command -v stdbuf >/dev/null 2>&1; then
+		stdbuf -oL -eL make "${MAKE_ARGS[@]}" "$@" 2>&1 | tee -a "$BUILD_ERRLOG"
+		STATUS=${PIPESTATUS[0]}
+	else
+		make "${MAKE_ARGS[@]}" "$@" 2>&1 | tee -a "$BUILD_ERRLOG"
+		STATUS=${PIPESTATUS[0]}
+	fi
+	echo "=== finished $(date -u +%H:%M:%S) (status $STATUS) ===" | tee -a "$BUILD_ERRLOG"
 	if [ "$STATUS" -ne 0 ]; then
 		echo
 		echo "############################################################"
