@@ -1,8 +1,8 @@
 # Redmi 12C / Poco C55 (earth / MT6768) 内核编译套件
 
-**KernelSU-Next v3.4.2 + SUSFS + Droidspaces** ｜ 基于 LineageOS 源码树 ｜ 云端编译，产出可直接刷入的 `boot.img`
+**KernelSU-Next（legacy / 非 GKI 分支）+ SUSFS + Droidspaces** ｜ 基于 LineageOS 源码树 ｜ 云端编译，产出可直接刷入的 `boot.img`
 
-> 📖 **第一次用？直接看 → [云端编译完整教程.md](云端编译教程.md)**（零基础，手把手，你电脑什么都不用装）
+> 📖 零基础走一遍：直接看第 3 节「使用步骤（云端编译）」和下面这段总结。
 >
 > 本文件是技术参考（原理、风险、参数调整）。
 
@@ -47,16 +47,34 @@
 
 这一点决定了整个方案能不能编译成功，值得单独说明：
 
-- 主线 **KernelSU-Next v3.4.2 自带的 `kernel/susfs/` 目录是 GKI/LKM 模式的实现**，
-  它依赖 GKI 的符号解析与模块加载机制，**4.19 非 GKI 内核用不了**。
-- 4.19 这种非 GKI 内核必须走 **源码内建 + 静态补丁** 路线。
-- 因此本套件使用官方 `setup.sh` 的 **`legacy`（非 GKI）模式**：
-  这会把 KernelSU 恢复成 **`kernel/` 目录 + 旧符号命名** 的布局
-  （`is_manager`、`on_post_fs_data`、`kernelsu_init` 等）。
-- 而 SUSFS 官方的 **`kernel-4.19` 分支** 的补丁正是针对这套旧布局和旧符号名写的
-  （它去 patch `kernel/Kconfig`，并做 `is_manager` → `ksu_is_manager` 这类重命名）。
-
-**两者恰好对上了**，这就是这套组合能成立的原因。
+- **KernelSU-Next 主线的发行版（`v3.4.x` 标签）在本树上编译不过**，实测报错：
+  ```
+  ../drivers/kernelsu/feature/sucompat.c:8:10: fatal error:
+  'linux/pgtable.h' file not found
+  ```
+  原因不是配置问题，而是源码本身调用了 4.19 里根本不存在的接口：
+  `linux/pgtable.h`（5.8 才有）、`strncpy_from_user_nofault()`（5.8）、
+  `TWA_RESUME`（5.8）、`user_stack_pointer()`（arm64 5.10 才有）。
+  这些是 GKI/新内核的写法。
+- 所以本套件使用 KernelSU-Next 的 **`legacy` 分支**（同代 KernelSU-Next 的
+  非 GKI 移植，自带 `kernel/compat/`：TWA_RESUME、nofault 拷贝、
+  `path_mount/path_umount` 兼容层，并把 `linux/pgtable.h` 用版本宏包住）。
+  `v3.4.0-legacy` 这类标签也可以用，并且可以固定到具体 commit。
+- `legacy` 分支仍有一处空缺：**arm64 4.19 没有 `user_stack_pointer()`**，
+  而 `include/linux/ptrace.h` 的 `current_user_stack_pointer()` 正是基于它定义的，
+  `feature/sucompat.c`、`feature/adb_root.c` 都在用。
+  `setup-kernel.sh` 会先检查内核树里到底有没有这个函数，确认没有才注入一个
+  arm64 兼容实现（优先复用内核自带的 `GET_USP()`，保证 32 位 compat 进程的栈指针也对）。
+- 钩子方式可选：默认 `kprobe`（kprobe + tracepoint，官方对非 GKI 的推荐做法），
+  如果这台设备上 kprobe 有问题（表现为刷完卡开机），把工作流输入
+  `ksu_hook` 改成 `syscall_table`（直接改 `sys_call_table`，不需要 kprobe）。
+- 主线 **KernelSU-Next 的 `kernel/susfs/` 目录是 GKI/LKM 模式的实现**，
+  依赖 GKI 的符号解析与模块加载机制，**4.19 非 GKI 内核用不了**；
+  4.19 必须走 SUSFS 官方的 **`kernel-4.19` 分支**静态补丁路线。
+- 而 SUSFS 官方 `kernel-4.19` 分支的 KSU 侧胶水补丁是针对 **旧版 KernelSU
+  的文件布局**（`kernel/core_hook.c`、`kernel/allowlist.c`、`kernel/apk_sign.c` …）写的，
+  KernelSU-Next 新布局（`kernel/core/`、`kernel/hook/`、`kernel/policy/` …）与它不一致，
+  所以 SUSFS 目前默认关闭（`susfs_enable=0`），先把 KernelSU 根跑通。
 
 ### 1.3 关于上次「Android 系统出现问题」和 fpsgo 刷屏
 
@@ -135,9 +153,11 @@ E:\Chormedownload\earth_global_images_V14.0.7.0.TCVMIXM_13.0\images\boot.img
 | `kernel_repo` | `LineageOS/android_kernel_xiaomi_earth` | 内核源码仓库 |
 | `kernel_ref` | `lineage-21` | 分支/标签 |
 | `defconfig` | `earth` | 对应 `arch/arm64/configs/earth_defconfig` |
-| `kernelsu_ref` | `v3.4.2` | KernelSU-Next 版本 |
+| `kernelsu_ref` | `legacy` | **必须是非 GKI 的 ref**：`legacy` 分支，或 `v3.4.0-legacy` 这类标签/具体 commit；填主线的 `v3.4.2` 一定编不过（见 1.2） |
+| `ksu_hook` | `kprobe` | `kprobe`（默认）或 `syscall_table`（kprobe 有问题、刷完卡开机时改这个） |
 | `susfs_ref` | `kernel-4.19` | SUSFS 分支 |
-| `clang_version` | `clang-r487747c` | AOSP 预编译 clang |
+| `susfs_enable` | `0` | 是否打 SUSFS（当前 KSU 侧胶水补丁还在适配，默认关） |
+| `jobs` | `3` | 并行编译任务数，调高更快但可能 OOM |
 | `stock_boot_img_url` | 空 | 填了才产出 `boot.img` |
 
 ### 步骤 4：下载产物
@@ -190,22 +210,29 @@ adb shell cat /proc/version
 #    "must have" 和 "recommended" 应全部通过
 ```
 
-> **KernelSU-Next 管理器**：v3.4.2 的 APK 在
-> [KernelSU-Next Releases](https://github.com/KernelSU-Next/KernelSU-Next/releases) 里下载
-> （你之前用的 1.0.8 已经非常旧了）。注意 KSU-Next 的包名/签名与老 KernelSU 不同，
+> **KernelSU-Next 管理器**：APK 在
+> [KernelSU-Next Releases](https://github.com/KernelSU-Next/KernelSU-Next/releases) 里下载。
+> `legacy` 分支只含内核侧代码，没有自己的管理器，所以直接用官方最新 APK 即可；
+> 若管理器提示内核版本不兼容，退一个版本（例如 v3.4.0）再试。
+> （你之前用的 1.0.8 已经非常旧了。）注意 KSU-Next 的包名/签名与老 KernelSU 不同，
 > 装之前先卸载旧管理器，但**不要卸载已授权的 root 应用**。
 
 ---
 
 ## 6. 已知风险与应对（请务必读）
 
-### 风险 1：SUSFS→KernelSU 胶水补丁可能有个别 hunk 打不上 ⚠️ 最可能出问题的一环
+### 风险 1：SUSFS→KernelSU 胶水补丁打不上 ⚠️ 目前 SUSFS 默认关闭的原因
 
-SUSFS 的 `kernel-4.19` 分支最后更新于 2025-02，而 KernelSU-Next v3.4.2 很新。
-补丁里对旧 KSU 源码做了一批**函数重命名**，如果上游已经自己改名，就会有 hunk 冲突。
+SUSFS 的 `kernel-4.19` 分支最后更新于 2025-02，它的 KSU 侧补丁
+（`10_enable_susfs_for_ksu.patch`）针对的是**旧版 KernelSU 的文件布局**
+（`kernel/core_hook.c`、`kernel/allowlist.c`、`kernel/apk_sign.c` …），
+而 KernelSU-Next 现在是 `kernel/core/`、`kernel/hook/`、`kernel/policy/` 新布局，
+补丁里的路径和函数重命名都对不上，必然有 hunk 冲突。
+这就是工作流里 `susfs_enable` 默认为 `0` 的原因：**先把 KernelSU 根跑通**，
+SUSFS 需要按新布局重写胶水补丁（工作量在第 1 轮编译之后单独做）。
 
 **处理方式**：`setup-kernel.sh` 会把失败原因和 `.rej` 文件数量打印到 `setup.log`，
-并把最关键的符号重命名列出来。**把 `setup.log` 发我，我按实际报错把补丁适配到 v3.4.2。**
+并把最关键的符号重命名列出来。**把 `setup.log` 发我，我按实际报错适配。**
 
 补丁涉及的旧→新符号名（可能需要对号入座）：
 ```
@@ -259,15 +286,25 @@ MTK 机型部分驱动是预编译模块（`vendor` 分区），它们要求 ver
 本套件按你的要求**不基于他的树**，而是：
 
 - 源码改用 **LineageOS 上游** `lineage-21`（更干净、更新，且无 Android 16 混合提交）；
-- 在他的思路基础上，把 KernelSU-Next 从 `1.0.8` 升到 **`v3.4.2`**；
-- 新增 **SUSFS** 与 **Droidspaces** 支持；
+- 在他的思路基础上，把 KernelSU-Next 从 `1.0.8` 换成 **新版 KernelSU-Next 的
+  `legacy`（非 GKI）分支** —— 主线的 `v3.4.x` 在 4.19 上编不过，`legacy` 才是
+  同代 KernelSU-Next 对老内核的移植；
+- 新增 **SUSFS** 与 **Droidspaces** 支持（SUSFS 的 KSU 侧胶水补丁仍在适配，暂默认关）；
 - 用「替换 stock boot.img 内核」代替整包打包，降低刷机风险。
 
 ---
 
 ## 8. 常用调整
 
-**换内核版本**：改 `kernelsu_ref`，例如填 `v3.4.1` 或某次 commit。
+**换 KernelSU-Next 版本**：改 `kernelsu_ref`。
+只能填非 GKI 的 ref：`legacy`（默认，跟随上游修复）、
+`v3.4.0-legacy` 这类标签，或某次 commit 的 SHA（脚本支持直接填 SHA，会把它
+fetch 下来 checkout，便于复现某次构建）。
+填主线标签（如 `v3.4.2`）会在 setup 阶段直接被拦下并提示原因。
+
+**kprobe 有问题时换钩子方式**：把 `ksu_hook` 改成 `syscall_table`。
+表现是刷完卡在开机（KernelSU 的 kprobe 钩子在这台机器上不工作），
+换完重跑一次 workflow 即可，不需要改代码。
 
 **换源码树**：改 `kernel_repo` / `kernel_ref`。
 例如想更贴近 MIUI 基线，可试 `mt6768-dev/android_kernel_xiaomi_earth`。
