@@ -84,6 +84,29 @@ jobs:
             rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 \
             unzip device-tree-compiler cpio
 
+          # Optional GCC cross-compiler, used only as a fallback by the build.
+          # Name varies between Ubuntu releases, so try the known aliases and
+          # never fail the job here: clang + LLVM=1 + LLVM_IAS=1 is the primary
+          # toolchain. (This kernel has no CONFIG_COMPAT, so no 32-bit is built.)
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            || sudo apt-get install -y -qq gcc-11-aarch64-linux-gnu \
+            || sudo apt-get install -y -qq gcc-12-aarch64-linux-gnu \
+            || echo "::warning title=No GCC cross-compiler::clang-only build will be used."
+          if command -v aarch64-linux-gnu-elfedit >/dev/null 2>&1; then
+            echo "GCC64_PATH=/usr" >> "$GITHUB_ENV"
+            aarch64-linux-gnu-gcc --version | head -1
+          else
+            echo "aarch64-linux-gnu-elfedit not present - building clang-only."
+          fi
+
+      - name: Download Android build-tools (mkdtimg / libufdt)
+        run: |
+          # Mirrored on GitHub: googlesource is slow/flaky from CI runners and
+          # the same host already caused a failure in an earlier run.
+          git clone --depth 1 https://github.com/LineageOS/android_system_libufdt.git build-tools/libufdt
+          echo "BUILDTOOLS_PATH=$PWD/build-tools" >> "$GITHUB_ENV"
+          ls build-tools/libufdt | head
+
       - name: Checkout kernel source
         run: |
           git clone --depth 1 --branch "${{ inputs.kernel_ref || 'lineage-21' }}" \
@@ -122,27 +145,6 @@ jobs:
           echo "CLANG_PATH=$PWD/toolchains/clang" >> "$GITHUB_ENV"
           ls toolchains/clang
           "$PWD/toolchains/clang/bin/clang" --version | head -2
-
-      - name: Download GCC cross toolchains
-        run: |
-          GCC64="aarch64--glibc--stable-2022.03-1"
-          GCC32="arm--glibc--stable-2022.03-1"
-          curl -fsSL "https://toolchains.bootlin.com/downloads/releases/toolchains/aarch64/tarballs/${GCC64}.tar.xz" -o gcc64.tar.xz
-          curl -fsSL "https://toolchains.bootlin.com/downloads/releases/toolchains/arm/tarballs/${GCC32}.tar.xz" -o gcc32.tar.xz
-          mkdir -p toolchains
-          tar -xf gcc64.tar.xz -C toolchains
-          tar -xf gcc32.tar.xz -C toolchains
-          rm -f gcc64.tar.xz gcc32.tar.xz
-          echo "GCC64_PATH=$PWD/toolchains/${GCC64}" >> "$GITHUB_ENV"
-          echo "GCC32_PATH=$PWD/toolchains/${GCC32}" >> "$GITHUB_ENV"
-          ls toolchains
-
-      - name: Download Android build-tools (mkdtimg / libufdt)
-        run: |
-          git clone --depth 1 --branch main \
-            https://android.googlesource.com/platform/system/libufdt build-tools/libufdt
-          echo "BUILDTOOLS_PATH=$PWD/build-tools" >> "$GITHUB_ENV"
-          ls build-tools/libufdt | head
 
       - name: Integrate KernelSU-Next + SUSFS + Droidspaces
         env:
