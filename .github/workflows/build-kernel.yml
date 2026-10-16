@@ -39,10 +39,6 @@ on:
         description: 'SUSFS branch (susfs4ksu)'
         required: false
         default: 'kernel-4.19'
-      clang_version:
-        description: 'AOSP prebuilt clang version'
-        required: false
-        default: 'clang-r487747c'
       stock_boot_img_url:
         description: 'Direct download URL of YOUR stock boot.img (optional; see tutorial)'
         required: false
@@ -97,18 +93,35 @@ jobs:
           echo "kernel HEAD: $(git -C kernel rev-parse --short HEAD)"
           sed -n '1,6p' kernel/Makefile
 
-      - name: Download AOSP clang toolchain
+      # Toolchain note: this is the prebuilt clang LineageOS itself uses to build
+      # kernel 4.19 for lineage-20. Do NOT swap in an Android 14/15/16 clang
+      # (clang-r4xxxxxx from android13+): those are too new for a 4.19 tree and
+      # fail on legacy constructs. r416183b is the safe, proven choice here.
+      - name: Download clang toolchain (LineageOS r416183b for kernel 4.19)
         run: |
-          CLANG_VER="${{ inputs.clang_version || 'clang-r487747c' }}"
+          set -euo pipefail
           mkdir -p toolchains
-          echo "downloading $CLANG_VER ..."
-          curl -fsSL "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VER}.tar.gz" \
-            -o clang.tar.gz
-          mkdir -p "toolchains/$CLANG_VER"
-          tar -xzf clang.tar.gz -C "toolchains/$CLANG_VER"
-          rm -f clang.tar.gz
-          echo "CLANG_PATH=$PWD/toolchains/$CLANG_VER" >> "$GITHUB_ENV"
-          "$PWD/toolchains/$CLANG_VER/bin/clang" --version | head -2
+          OK=0
+          for REPO in \
+            LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b \
+            AOSPA/android_prebuilts_clang_kernel_linux-x86_clang-r416183b ; do
+            echo "trying $REPO ..."
+            if git clone --depth 1 "https://github.com/${REPO}.git" toolchains/clang-src 2>/dev/null; then
+              OK=1
+              echo "cloned $REPO"
+              break
+            fi
+            rm -rf toolchains/clang-src
+          done
+          if [ "$OK" -ne 1 ]; then
+            echo "::error title=clang download failed::Could not clone a prebuilt clang toolchain from any known mirror."
+            exit 1
+          fi
+          mv toolchains/clang-src toolchains/clang
+          rm -rf toolchains/clang/.git
+          echo "CLANG_PATH=$PWD/toolchains/clang" >> "$GITHUB_ENV"
+          ls toolchains/clang
+          "$PWD/toolchains/clang/bin/clang" --version | head -2
 
       - name: Download GCC cross toolchains
         run: |
@@ -222,7 +235,7 @@ jobs:
             echo "| kernel commit | \`${KERNEL_SHA}\` |"
             echo "| KernelSU-Next | \`${{ inputs.kernelsu_ref || 'v3.4.2' }}\` |"
             echo "| SUSFS | \`${{ inputs.susfs_ref || 'kernel-4.19' }}\` |"
-            echo "| clang | \`${{ inputs.clang_version || 'clang-r487747c' }}\` |"
+            echo "| clang | \`clang-r416183b\` (LineageOS prebuilt for kernel 4.19) |"
             echo "| stock boot.img | ${{ steps.bootimg.outputs.have == '1' && 'provided - boot.img will be produced' || 'not provided - raw kernel only' }} |"
             echo ""
             echo '### Artifacts'
