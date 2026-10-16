@@ -166,6 +166,10 @@ jobs:
           KSU_REF: ${{ inputs.kernelsu_ref || 'legacy' }}
           KSU_HOOK_MODE: ${{ inputs.ksu_hook || 'kprobe' }}
         run: |
+          # pipefail matters: without it the exit status of "script | tee log"
+          # is tee's, so a failing script still reports a green step and the job
+          # marches on into repack with missing artifacts.
+          set -o pipefail
           chmod +x scripts/*.sh
           ./scripts/setup-kernel.sh "$PWD/kernel" 2>&1 | tee setup.log
           echo "--- patch reject files (if any) ---"
@@ -181,6 +185,9 @@ jobs:
         run: |
           # The build output streams live (see scripts/build.sh), so this step
           # shows progress instead of appearing frozen for 30+ minutes.
+          # pipefail is required: "build.sh ... | tee build.log" would otherwise
+          # return tee's status and hide a failed build from the workflow.
+          set -o pipefail
           JOBS="$JOBS" ./scripts/build.sh "$PWD/kernel" 2>&1 | tee build.log
 
       - name: Prepare stock boot.img
@@ -269,7 +276,7 @@ jobs:
           # exists, instead of passing an empty argument downstream.
           NEW_KERNEL=""
           for CAND in kernel/dist/Image.gz-dtb kernel/dist/Image-dtb kernel/dist/Image.gz kernel/dist/Image; do
-            if [ -f "$CAND" ]; then NEW_KERNEL="$CAND"; break; fi
+            if [ -f "$CAND" ]; then NEW_KERNEL="$(realpath "$CAND")"; break; fi
           done
           if [ -z "$NEW_KERNEL" ]; then
             echo "::error title=No kernel payload::No flashable kernel image was produced."
@@ -283,8 +290,10 @@ jobs:
           fi
           echo "using kernel payload: $NEW_KERNEL ($(stat -c%s "$NEW_KERNEL") bytes)"
 
+          # Absolute paths on purpose: repack-bootimg.sh cd's into a temp
+          # workdir, and relative paths stop resolving after that.
           chmod +x scripts/repack-bootimg.sh
-          ./scripts/repack-bootimg.sh stock.img "$NEW_KERNEL" earth-boot-new.img 2>&1 | tee repack.log
+          ./scripts/repack-bootimg.sh "$PWD/stock.img" "$NEW_KERNEL" "$PWD/earth-boot-new.img" 2>&1 | tee repack.log
           ls -la earth-boot-new.img
 
       - name: Summarize results
