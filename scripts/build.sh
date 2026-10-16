@@ -371,7 +371,14 @@ mkdir -p "$DIST"
 shopt -s nullglob
 IMAGES=("$KERNEL_ROOT"/out/arch/arm64/boot/Image*)
 DTBS=("$KERNEL_ROOT"/out/arch/arm64/boot/dts/mediatek/*.dtb)
-DTBO=("$KERNEL_ROOT"/out/arch/arm64/boot/dtbo.img)
+# NOTE: no wildcard here on purpose -- and therefore nullglob does NOT apply.
+# If this file is absent the old code still ran "cp <literal path>" and, under
+# set -e, killed the script right here: every artifact after this point
+# (kernel.config, System.map, payload report) was silently lost, and because the
+# workflow piped build.sh into tee, the CI step still looked successful.
+# dtbo.img is a separate partition image on this device and is not produced by
+# this build, so absence is normal.
+DTBO_IMG="$KERNEL_ROOT/out/arch/arm64/boot/dtbo.img"
 
 if [ ${#IMAGES[@]} -eq 0 ]; then
 	echo "ERROR: no kernel image produced under out/arch/arm64/boot/"
@@ -387,9 +394,11 @@ mkdir -p "$DIST/dtb"
 for f in "${DTBS[@]}"; do
 	cp -v "$f" "$DIST/dtb/"
 done
-for f in "${DTBO[@]}"; do
-	cp -v "$f" "$DIST/"
-done
+if [ -f "$DTBO_IMG" ]; then
+	cp -v "$DTBO_IMG" "$DIST/"
+else
+	echo "[i] no dtbo.img in this build (separate partition image; not needed for boot.img)"
+fi
 
 cp -v out/.config "$DIST/kernel.config"
 if [ -f out/System.map ]; then cp -v out/System.map "$DIST/"; fi
