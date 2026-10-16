@@ -204,12 +204,35 @@ jobs:
       - name: Download magiskboot
         if: steps.bootimg.outputs.have == '1'
         run: |
-          MAGISK_VER=$(curl -fsSL https://api.github.com/repos/topjohnwu/Magisk/releases/latest \
-            | grep -oP '"tag_name":\s*"\K[^"]+' | head -1)
-          echo "Magisk $MAGISK_VER"
-          curl -fsSL "https://github.com/topjohnwu/Magisk/releases/download/${MAGISK_VER}/Magisk-${MAGISK_VER#v}.apk" -o magisk.apk
+          set -euo pipefail
           mkdir -p magiskboot-dir
-          unzip -o -j magisk.apk 'lib/x86_64/libmagiskboot.so' -d magiskboot-dir
+
+          # Ask the API for the real asset URL instead of constructing the file
+          # name ourselves. Magisk has changed its asset naming before
+          # (e.g. v30.7 ships "Magisk-v30.7.apk", not "Magisk-30.7.apk"), and
+          # guessing it is exactly what broke an earlier run.
+          #
+          # We use `curl -o` rather than a command substitution: when a command
+          # substitution is used to capture the JSON, GitHub blanks the whole
+          # thing as a secret because the body contains private-repo URLs.
+          curl -fsSL https://api.github.com/repos/topjohnwu/Magisk/releases/latest -o magisk-release.json
+          APK_URL=$(grep -o '"browser_download_url":[^,]*Magisk[^,]*\.apk"' magisk-release.json \
+                    | grep -v app-debug | head -1 \
+                    | sed -e 's/.*"browser_download_url":[[:space:]]*"//' -e 's/"$//')
+          APK_NAME=$(basename "$APK_URL")
+          if [ -z "$APK_URL" ]; then
+            echo "::error title=Magisk asset not found::Could not find a Magisk APK asset in the latest release."
+            exit 1
+          fi
+          echo "resolved Magisk asset: $APK_NAME"
+
+          curl -fsSL "$APK_URL" -o magisk.apk
+
+          # libmagiskboot.so is the magiskboot binary; on x86_64 runners it is
+          # under lib/x86_64/. Print the APK contents if that path ever moves.
+          unzip -o -j magisk.apk 'lib/x86_64/libmagiskboot.so' -d magiskboot-dir \
+            || { echo "--- APK contents (lib/*) ---"; unzip -l magisk.apk | grep -i 'lib/' || true; exit 1; }
+
           mv magiskboot-dir/libmagiskboot.so magiskboot-dir/magiskboot
           chmod +x magiskboot-dir/magiskboot
           echo "$PWD/magiskboot-dir" >> "$GITHUB_PATH"
