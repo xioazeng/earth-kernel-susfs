@@ -33,9 +33,9 @@ on:
         required: false
         default: 'earth'
       kernelsu_ref:
-        description: 'KernelSU ref. Must be a SUSFS-native fork/branch, e.g. the default rsuntk/KernelSU "susfs-rksu-master".'
+        description: 'KernelSU ref. Must be a SUSFS-native branch matching the 4.19 SUSFS API (default: rsuntk/KernelSU deprecated/susfs-legacy).'
         required: false
-        default: 'susfs-rksu-master'
+        default: 'deprecated/susfs-legacy'
       susfs_ref:
         description: 'SUSFS branch (susfs4ksu)'
         required: false
@@ -159,7 +159,7 @@ jobs:
         env:
           DEFCONFIG: ${{ inputs.defconfig || 'earth' }}
           SUSFS_ENABLE: ${{ inputs.susfs_enable || '1' }}
-          KSU_REF: ${{ inputs.kernelsu_ref || 'susfs-rksu-master' }}
+          KSU_REF: ${{ inputs.kernelsu_ref || 'deprecated/susfs-legacy' }}
         run: |
           # pipefail matters: without it the exit status of "script | tee log"
           # is tee's, so a failing script still reports a green step and the job
@@ -301,7 +301,7 @@ jobs:
             echo "| kernel repo | \`${{ inputs.kernel_repo || 'LineageOS/android_kernel_xiaomi_earth' }}\` |"
             echo "| kernel ref | \`${{ inputs.kernel_ref || 'lineage-21' }}\` |"
             echo "| kernel commit | \`${KERNEL_SHA}\` |"
-            echo "| KernelSU | \`${{ inputs.kernelsu_ref || 'susfs-rksu-master' }}\` (SUSFS-native fork) |"
+            echo "| KernelSU | \`${{ inputs.kernelsu_ref || 'deprecated/susfs-legacy' }}\` (SUSFS-native, 4.19 API match) |"
             echo "| SUSFS | \`${{ inputs.susfs_ref || 'kernel-4.19' }}\` (enabled: \`${{ inputs.susfs_enable || '1' }}\`) |"
             echo "| clang | \`clang-r416183b\` (LineageOS prebuilt for kernel 4.19) |"
             echo "| stock boot.img | ${{ steps.bootimg.outputs.have == '1' && 'provided - boot.img will be produced' || 'not provided - raw kernel only' }} |"
