@@ -137,7 +137,24 @@ START=$(date +%s)
 
 # dtbs first: the appended-DTB image target depends on them.
 make "${MAKE_ARGS[@]}" -j"$JOBS" dtbs
-make "${MAKE_ARGS[@]}" -j"$JOBS" Image.gz
+
+# Which final image to build depends on arch/arm64/Makefile:
+#   ifeq ($(CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE),y)
+#   KBUILD_IMAGE := $(boot)/$(CONFIG_BUILD_ARM64_APPENDED_KERNEL_IMAGE_NAME)
+#
+# This device sets CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y, so the flashable
+# payload is Image.gz-dtb (kernel + appended DTB), NOT Image.gz.
+# Building only Image.gz leaves out the appended DTB entirely, so we build the
+# configured image name explicitly.
+KIMG="Image.gz-dtb"
+if [ -f out/include/config/auto.conf ]; then
+	CFG_IMG=$(sed -n 's/^CONFIG_BUILD_ARM64_APPENDED_KERNEL_IMAGE_NAME="\(.*\)"/\1/p' out/include/config/auto.conf | head -1)
+	if [ -n "$CFG_IMG" ]; then
+		KIMG="$CFG_IMG"
+	fi
+fi
+echo "[i] building kernel image target: $KIMG"
+make "${MAKE_ARGS[@]}" -j"$JOBS" "$KIMG"
 
 END=$(date +%s)
 echo "[i] build finished in $(( (END - START) / 60 )) min"
@@ -177,16 +194,38 @@ cp -v out/.config "$DIST/kernel.config"
 if [ -f out/System.map ]; then cp -v out/System.map "$DIST/"; fi
 if [ -f out/vmlinux ]; then cp -v out/vmlinux "$DIST/"; fi
 
-# The device uses CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE, so the flashable
-# kernel is Image.gz-dtb (kernel + appended DTB in one blob).
-if [ -f "$KERNEL_ROOT"/out/arch/arm64/boot/Image.gz-dtb ]; then
+# Resolve the flashable payload explicitly and fail loudly if we cannot.
+# This device sets CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y, so the payload MUST
+# be Image.gz-dtb (kernel + appended DTB). A bare Image.gz would produce a
+# boot.img with no device tree, which is exactly the kind of silent breakage
+# we want to catch here rather than on the phone.
+PAYLOAD=""
+for cand in "$KERNEL_ROOT/out/arch/arm64/boot/$KIMG" \
+            "$KERNEL_ROOT/out/arch/arm64/boot/Image.gz-dtb"; do
+	if [ -f "$cand" ]; then
+		PAYLOAD="$cand"
+		break
+	fi
+done
+
+if [ -z "$PAYLOAD" ]; then
 	echo
-	echo "[i] appended-DTB image present -> boot.img kernel will be Image.gz-dtb"
-	cp -v "$KERNEL_ROOT"/out/arch/arm64/boot/Image.gz-dtb "$DIST/Image.gz-dtb"
-elif [ -f "$KERNEL_ROOT"/out/arch/arm64/boot/Image.gz ]; then
-	echo
-	echo "[!] Image.gz-dtb NOT found; falling back to Image.gz + separate dtb."
-	echo "    If the device does not boot, check BUILD_ARM64_APPENDED_DTB_IMAGE."
+	echo "ERROR: no usable kernel payload found."
+	echo "       expected: $KERNEL_ROOT/out/arch/arm64/boot/$KIMG"
+	echo "       actual contents of out/arch/arm64/boot:"
+	ls -la "$KERNEL_ROOT/out/arch/arm64/boot/" 2>/dev/null | sed 's/^/         /' || echo "         <directory missing>"
+	echo "       If only Image.gz exists, CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE"
+	echo "       is not taking effect; the appended-DTB target did not build."
+	exit 3
+fi
+
+cp -v "$PAYLOAD" "$DIST/$(basename "$PAYLOAD")"
+echo "[i] flashable payload  : $(basename "$PAYLOAD")"
+echo "[i] payload size       : $(stat -c%s "$PAYLOAD") bytes"
+
+if [ "$(basename "$PAYLOAD")" != "Image.gz-dtb" ]; then
+	echo "[!] note: payload is $(basename "$PAYLOAD"), not Image.gz-dtb."
+	echo "    The boot.img dtb field will be preserved from stock instead."
 fi
 
 # Report the fingerprint we will compare against the boot header in CI.
