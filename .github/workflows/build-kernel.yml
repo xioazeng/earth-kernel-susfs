@@ -43,6 +43,10 @@ on:
         description: 'Apply SUSFS (1 = yes, 0 = KernelSU-Next only). Port in progress.'
         required: false
         default: '0'
+      jobs:
+        description: 'Parallel make jobs (default 3; higher is faster but can OOM the runner)'
+        required: false
+        default: '3'
       stock_boot_img_url:
         description: 'Direct download URL of YOUR stock boot.img (optional; see tutorial)'
         required: false
@@ -161,11 +165,14 @@ jobs:
           find kernel -name '*.rej' | head -50 || true
 
       - name: Build kernel
+        timeout-minutes: 180
         env:
           DEFCONFIG: ${{ inputs.defconfig || 'earth' }}
           SUSFS_ENABLE: ${{ inputs.susfs_enable || '0' }}
+          JOBS: ${{ inputs.jobs || '3' }}
         run: |
-          JOBS="$(nproc)"
+          # The build output streams live (see scripts/build.sh), so this step
+          # shows progress instead of appearing frozen for 30+ minutes.
           JOBS="$JOBS" ./scripts/build.sh "$PWD/kernel" 2>&1 | tee build.log
 
       - name: Prepare stock boot.img
@@ -324,5 +331,6 @@ jobs:
             setup.log
             build.log
             build-error.log
+            memory.log
             repack.log
           if-no-files-found: warn
