@@ -1,0 +1,10 @@
+# Shell scripts and workflow YAML MUST use LF line endings.
+# On Windows, git's autocrlf would otherwise convert them to CRLF and break
+# execution inside the Linux CI runner with errors like:
+#   /usr/bin/env: 'bash\r': No such file or directory
+*.sh            text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.patch         text eol=lf
+*.fragment      text eol=lf
+Dockerfile      text eol=lf

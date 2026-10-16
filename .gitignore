@@ -1,0 +1,12 @@
+# Local build scratch (not needed in the repo)
+out/
+dist/
+*.log
+*.rej
+*.orig
+.susfs4ksu/
+
+# Optional: the stock boot.img you upload so the workflow can repack it.
+# Keeping it out of git history avoids bloating the repo, but then you must
+# pass a download URL instead. Uncomment the line below if you prefer that.
+# stock-boot.img
