@@ -1,22 +1,23 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  setup-kernel.sh
-#  Inserts KernelSU-Next + SUSFS + Droidspaces support into the LineageOS
+#  Inserts KernelSU (+SUSFS) and Droidspaces support into the LineageOS
 #  android_kernel_xiaomi_earth tree (Linux 4.19, non-GKI, MT6768 "earth").
 #
 #  Usage:  ./setup-kernel.sh /path/to/kernel/root
 #
 #  Order matters and is deliberate:
-#    1) KernelSU-Next in "legacy" (non-GKI) mode -> provides kernel/ + drivers/kernelsu
+#    1) KernelSU (SUSFS-native fork, old layout) -> kernel/ + drivers/kernelsu
 #       plus the 4.19 compatibility fixups described in section 1a/1b below
-#    2) SUSFS kernel-side patches                 -> requires the KSU tree from (1)
+#    2) SUSFS kernel-side patch (susfs4ksu kernel-4.19) -> requires the KSU tree
+#       from (1); the KSU-side half is already inside the fork
 #    3) Droidspaces non-GKI patches               -> independent kernel patches
 #    4) Droidspaces config fragment               -> merged at config time
 #
 #  Environment knobs:
-#    KSU_REF       KernelSU-Next ref to check out   (default: legacy)
-#    KSU_HOOK_MODE kprobe | syscall_table           (default: kprobe)
-#    SUSFS_ENABLE  1 | 0                            (default: 1, see section 2)
+#    KSU_REF       KernelSU ref to check out   (default: susfs-rksu-master)
+#    KSU_REPO      KernelSU repository         (default: rsuntk/KernelSU)
+#    SUSFS_ENABLE  1 | 0                       (default: 1, see section 2)
 #    DEFCONFIG     defconfig name without _defconfig (default: earth)
 # =============================================================================
 set -euo pipefail
@@ -24,35 +25,36 @@ set -euo pipefail
 KERNEL_ROOT="${1:-$(pwd)}"
 KERNEL_ROOT="$(cd "$KERNEL_ROOT" && pwd)"
 
-KSU_REPO="https://github.com/KernelSU-Next/KernelSU-Next.git"
-# IMPORTANT: use the `legacy` branch, not a main-branch release.
+# ---------------------------------------------------------------------------
+# KernelSU source: a fork that has SUSFS *built into* its kernel code.
 #
-# The main-branch releases (v3.4.x) are GKI-oriented. Their kernel sources call
-# APIs that do not exist in Linux 4.19 at all:
-#     include <linux/pgtable.h>       (added in 5.8)
-#     strncpy_from_user_nofault()     (added in 5.8)
-#     TWA_RESUME                      (added in 5.8)
-#     current_user_stack_pointer()    (arm64 implementation added in 5.10)
-# Building v3.4.2 on this tree stops with:
-#     drivers/kernelsu/feature/sucompat.c:8:10: fatal error:
-#     'linux/pgtable.h' file not found
-# The `legacy` branch is the same KernelSU-Next generation ported back to
-# non-GKI/older kernels: it carries kernel/compat/ (TWA_RESUME, nofault copies,
-# path_mount/path_umount, ...) and version-guards the includes above.
-# A "<version>-legacy" tag (e.g. v3.4.0-legacy) also works and is pinnable.
-KSU_REF="${KSU_REF:-legacy}"
+# Why not KernelSU-Next?
+#   * KernelSU-Next's own SUSFS is a loadable module built against DDK/GKI
+#     headers (kernel/susfs/Makefile: "obj-m += susfs_guard_lkm.o", "Build
+#     against DDK kernel headers") -- impossible on a non-GKI 4.19 kernel that
+#     is built from source.
+#   * Its `legacy` branch (the non-GKI one) has no SUSFS support at all, and the
+#     classic susfs4ksu glue patch targets the *old* KernelSU layout
+#     (kernel/core_hook.c, ksu.c, allowlist.c, supercalls via prctl) which no
+#     longer exists there: measured 0/58 hunks applicable.
+#   * The non-GKI community build project (NootFond/NonGKI_Kernel_Build_mix2s)
+#     marks KernelSU-Next "Not Supported" for SUSFS and lists 4.19 + SuSFS as
+#     working with the SUSFS-native forks instead.
+#
+# rsuntk/KernelSU branch `susfs-rksu-master` is one of those: an old-layout
+# KernelSU (= the layout the susfs4ksu kernel-4.19 patches expect) with the
+# whole SUSFS plumbing already inside:
+#     kernel/Kconfig      -> the KSU_SUSFS* menu
+#     kernel/supercalls.c -> every CMD_SUSFS_* handler
+#     kernel/Makefile     -> non-GKI backports (path_umount, seccomp filter_count)
+#   so no KSU-side patch has to be ported at all. Only the *kernel-side* SUSFS
+#   patch from susfs4ksu is still needed (fs/susfs.c + fs/* hooks), which is
+#   what the SUSFS flow below applies.
+KSU_REPO="${KSU_REPO:-https://github.com/rsuntk/KernelSU.git}"
+KSU_REF="${KSU_REF:-susfs-rksu-master}"
 
-# kprobe      : tracepoint + kretprobe hooks (upstream's non-GKI recommendation)
-# syscall_table: patch sys_call_table directly, for kernels where kprobes are
-#                unavailable or misbehave (KernelSU-Next >= 4.17 pt_regs ABI).
-KSU_HOOK_MODE="${KSU_HOOK_MODE:-kprobe}"
-case "$KSU_HOOK_MODE" in
-kprobe | syscall_table) ;;
-*)
-	echo "ERROR: KSU_HOOK_MODE must be 'kprobe' or 'syscall_table' (got '$KSU_HOOK_MODE')" >&2
-	exit 2
-	;;
-esac
+# KernelSU hooks: this layout has no hook-mode Kconfig choice -- it uses the
+# kernel's kprobes (CONFIG_KPROBES) plus LSM hooks, which is what 4.19 needs.
 
 SUSFS_REPO="https://gitlab.com/simonpunk/susfs4ksu.git"
 SUSFS_REF="kernel-4.19"                # official 4.19 branch (non-GKI)
@@ -85,11 +87,10 @@ apply_patch() {
 
 # =============================================================================
 echo "=============================================================="
-echo " earth kernel: KernelSU-Next + SUSFS + Droidspaces setup"
+echo " earth kernel: KernelSU + SUSFS + Droidspaces setup"
 echo "=============================================================="
 echo " kernel root : $KERNEL_ROOT"
-echo " KSU         : $KSU_REPO @ $KSU_REF (legacy / non-GKI mode)"
-echo " KSU hooks   : $KSU_HOOK_MODE"
+echo " KSU         : $KSU_REPO @ $KSU_REF (SUSFS-native, old layout / non-GKI)"
 echo " SUSFS       : $SUSFS_REPO @ $SUSFS_REF"
 echo
 
@@ -113,13 +114,13 @@ fi
 echo
 
 # =============================================================================
-# 1) KernelSU-Next, legacy (non-GKI) integration
+# 1) KernelSU (SUSFS-native fork, old layout / non-GKI)
 # =============================================================================
 # We do NOT use upstream setup.sh: it hard-resets to the repo's default branch
 # and does a `git pull`, which would silently move us off the pinned release.
 # Instead we replicate exactly what legacy setup.sh does, on the pinned tag.
 # =============================================================================
-echo "[1/4] KernelSU-Next ($KSU_REF, legacy mode)"
+echo "[1/4] KernelSU ($KSU_REF)"
 KSU_DIR="$KERNEL_ROOT/KernelSU"
 
 if [ -d "$KSU_DIR" ]; then
@@ -141,30 +142,38 @@ KSU_SHA=$(git -C "$KSU_DIR" rev-parse HEAD 2>/dev/null || echo unknown)
 KSU_BRANCH=$(git -C "$KSU_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo detached)
 echo "   -> cloned $KSU_DESC  (ref=$KSU_BRANCH sha=$KSU_SHA)"
 
-# The "kernel/Kconfig" file is what the SUSFS KSU-side patch expects to patch.
-if [ ! -f "$KSU_DIR/kernel/Kconfig" ]; then
-	fail_critical "KernelSU-Next legacy layout not found: $KSU_DIR/kernel/Kconfig is missing."
+# The old ("pre-v3") KernelSU layout keeps everything directly under kernel/,
+# and that is the layout the classic susfs4ksu patches expect.
+if [ ! -f "$KSU_DIR/kernel/Kconfig" ] || [ ! -f "$KSU_DIR/kernel/Makefile" ]; then
+	fail_critical "KernelSU old layout not found: $KSU_DIR/kernel/{Kconfig,Makefile} missing."
 	echo "   directory listing of $KSU_DIR:"
 	ls -la "$KSU_DIR" | sed 's/^/      /' || true
 else
-	echo "   -> legacy layout confirmed (kernel/Kconfig present)"
+	echo "   -> old KernelSU layout confirmed (kernel/Kconfig + kernel/Makefile)"
 fi
 
 # -----------------------------------------------------------------------------
-# 1a) Non-GKI preflight.
+# 1a) SUSFS preflight.
 #
-# `kernel/compat/kernel_compat.h` only exists on the non-GKI (legacy) side of
-# KernelSU-Next. Without it the ref is a GKI/LKM-oriented release that cannot
-# compile against Linux 4.19 -- fail here with the real reason instead of
-# letting the build die 25 minutes later on 'linux/pgtable.h'.
+# This kit deliberately uses a KernelSU fork that has the SUSFS plumbing already
+# inside its kernel code (see the header comment). Verify that here: building a
+# KSU without it and then wondering why ksu_susfs cannot talk to the kernel is
+# the exact failure this check exists to prevent.
 # -----------------------------------------------------------------------------
-if [ ! -f "$KSU_DIR/kernel/compat/kernel_compat.h" ]; then
-	fail_critical "ref '$KSU_REF' is GKI-oriented: kernel/compat/kernel_compat.h is missing."
-	echo "      That code uses Linux 5.8/5.10+ APIs (linux/pgtable.h, TWA_RESUME,"
-	echo "      strncpy_from_user_nofault, user_stack_pointer) and cannot build on 4.19."
-	echo "      Use KSU_REF=legacy (or a pinned '<version>-legacy' tag / commit SHA)."
+KSU_SUSFS_OK=1
+if ! grep -q 'config KSU_SUSFS$' "$KSU_DIR/kernel/Kconfig" 2>/dev/null; then
+	KSU_SUSFS_OK=0
+fi
+if ! grep -q 'CMD_SUSFS_ADD_SUS_PATH' "$KSU_DIR/kernel/supercalls.c" 2>/dev/null; then
+	KSU_SUSFS_OK=0
+fi
+if [ "$KSU_SUSFS_OK" -eq 1 ]; then
+	echo "   -> SUSFS plumbing confirmed (Kconfig menu + CMD_SUSFS_* in supercalls.c)"
 else
-	echo "   -> non-GKI compat layer confirmed (kernel/compat/kernel_compat.h)"
+	fail_critical "ref '$KSU_REF' has no built-in SUSFS plumbing."
+	echo "      Expected a SUSFS-native branch, e.g. rsuntk/KernelSU @ susfs-rksu-master"
+	echo "      (kernel/Kconfig: 'config KSU_SUSFS', kernel/supercalls.c: CMD_SUSFS_*)."
+	echo "      KernelSU-Next has no non-GKI SUSFS: its own support is a GKI/LKM module."
 fi
 
 # -----------------------------------------------------------------------------
@@ -172,8 +181,8 @@ fi
 #
 #     (i)  arm64 kernels before 5.10 do not provide user_stack_pointer(), yet
 #          include/linux/ptrace.h defines current_user_stack_pointer() on top of
-#          it. feature/sucompat.c and feature/adb_root.c use it, so the build
-#          stops with "call to undeclared function 'user_stack_pointer'".
+#          it. sucompat.c (userspace_stack_buffer) uses it, so the build stops
+#          with "call to undeclared function 'user_stack_pointer'".
 #          Inject the upstream v5.10 arm64 implementation -- but only when the
 #          kernel tree really does not define it (verified by grep, not assumed).
 #     (ii) an unguarded "#include <linux/pgtable.h>" (the header appeared in 5.8)
@@ -181,8 +190,16 @@ fi
 #
 #     Both fixups are idempotent and printed, so a re-run is harmless.
 # -----------------------------------------------------------------------------
-KSU_ARCH_H="$KSU_DIR/kernel/include/arch.h"
-KSU_419_H="$KSU_DIR/kernel/include/ksu_419_compat.h"
+# The arch header moved between KernelSU generations: kernel/arch.h (old layout,
+# what this kit uses) vs kernel/include/arch.h (v3 layout).
+if [ -f "$KSU_DIR/kernel/include/arch.h" ]; then
+	KSU_INC_DIR="$KSU_DIR/kernel/include"
+else
+	KSU_INC_DIR="$KSU_DIR/kernel"
+fi
+KSU_ARCH_H="$KSU_INC_DIR/arch.h"
+KSU_419_H="$KSU_INC_DIR/ksu_419_compat.h"
+echo "   -> KernelSU arch header: $KSU_ARCH_H"
 
 if [ -f "$KSU_ARCH_H" ]; then
 	# Look for an actual DEFINITION, not for a use: include/linux/ptrace.h on
@@ -246,7 +263,7 @@ EOF
 		fi
 	fi
 else
-	fail_critical "missing $KSU_ARCH_H - unexpected KernelSU-Next layout"
+	fail_critical "missing $KSU_ARCH_H - unexpected KernelSU layout"
 fi
 
 if [ ! -f "$KERNEL_ROOT/include/linux/pgtable.h" ]; then
@@ -287,20 +304,34 @@ echo
 #
 # SUSFS_ENABLE=1 (default) applies it; SUSFS_ENABLE=0 skips it entirely.
 #
-# Why the switch exists: the official SUSFS non-GKI patch set (susfs4ksu
-# kernel-4.19, frozen 2025-02) targets LEGACY KernelSU's file layout
-# (kernel/core_hook.c, kernel/allowlist.c, kernel/apk_sign.c, ...).
-# KernelSU-Next v3.4.2 restructured those into kernel/core/, kernel/hook/,
-# kernel/feature/, ... so the KernelSU-side glue patch cannot apply as-is.
-# The kernel-side half is ported here (see the task_mmu repair below); the
-# KernelSU-side half is still being ported. Keeping the switch lets us
-# validate the base kernel build independently, then layer SUSFS on top.
+# Division of labour:
+#   * KSU side  -- already inside the KernelSU fork we build (kernel/Kconfig
+#                  menu + CMD_SUSFS_* handlers in kernel/supercalls.c), verified
+#                  in step 1a above. Nothing to patch here.
+#   * kernel side -- the classic susfs4ksu kernel-4.19 patch set: fs/* hooks via
+#                  50_add_susfs_in_kernel-4.19.patch plus fs/susfs.c and the
+#                  headers, which are copied in below.
+# Measured against the LineageOS earth tree: 69 of 72 hunks apply directly; the
+# 3 exceptions are repaired further down (fs/proc/task_mmu.c include, and the two
+# include/linux/sched.h task_struct hunks).
 # =============================================================================
 SUSFS_ENABLE="${SUSFS_ENABLE:-1}"
 
 if [ "$SUSFS_ENABLE" != "1" ]; then
 	echo "[2/4] SUSFS - SKIPPED (SUSFS_ENABLE=$SUSFS_ENABLE)"
-	echo "   -> building KernelSU-Next without SUSFS"
+	# This KSU fork refuses to build without the kernel-side SUSFS: its
+	# kernel/Makefile contains
+	#     $(error -- You have not integrated susfs in your kernel yet ...)
+	# when fs/susfs.c is absent. Failing here with that reason beats letting
+	# make die with a one-line error later on.
+	if grep -q 'You have not integrated susfs in your kernel yet' "$KSU_DIR/kernel/Makefile" 2>/dev/null; then
+		fail_critical "KSU_REF '$KSU_REF' requires the SUSFS kernel-side patch."
+		echo "      Its kernel/Makefile aborts when fs/susfs.c is absent, so"
+		echo "      SUSFS_ENABLE=1 is mandatory with this KernelSU source."
+		echo "      For a root-only build, point KSU_REF at a non-SUSFS KernelSU."
+	else
+		echo "   -> building KernelSU without SUSFS"
+	fi
 	echo
 else
 
@@ -313,24 +344,20 @@ if ! git clone --depth 1 --branch "$SUSFS_REF" "$SUSFS_REPO" "$SUSFS_SRC"; then
 else
 	SUSFS_KP="$SUSFS_SRC/kernel_patches"
 
-	# 2a) KernelSU-side glue patch (creates the CONFIG_KSU_SUSFS_* menu)
-	if [ -f "$SUSFS_KP/KernelSU/10_enable_susfs_for_ksu.patch" ]; then
-		cp "$SUSFS_KP/KernelSU/10_enable_susfs_for_ksu.patch" "$KSU_DIR/10_enable_susfs_for_ksu.patch"
-		if ! apply_patch "$KSU_DIR" "$KSU_DIR/10_enable_susfs_for_ksu.patch" \
-				"KernelSU SUSFS glue (10_enable_susfs_for_ksu)" \
-				"$KERNEL_ROOT/.patch-ksu-susfs.log"; then
-			fail_critical "SUSFS->KernelSU glue patch did not apply cleanly."
-			echo "      The SUSFS 4.19 branch targets an older KernelSU-Next."
-			echo "      Rejects that matter most (symbol renames):"
-			echo "        is_manager -> ksu_is_manager, escape_to_root -> ksu_escape_to_root,"
-			echo "        setup_selinux -> ksu_setup_selinux, kernelsu_init -> ksu_kernelsu_init,"
-			echo "        on_post_fs_data -> ksu_on_post_fs_data, track_throne -> ksu_track_throne,"
-			echo "        handle_sepolicy -> ksu_handle_sepolicy, apply_kernelsu_rules -> ksu_apply_kernelsu_rules,"
-			echo "        is_manager_apk -> ksu_is_manager_apk, is_zygote -> ksu_is_zygote,"
-			echo "        is_ksu_domain -> ksu_is_ksu_domain, getenforce -> ksu_getenforce"
-		fi
+	# 2a) KernelSU-side glue: NOT applied here.
+	#
+	# susfs4ksu ships kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch for
+	# the old KernelSU layout. We no longer need it (and it does not apply to the
+	# v3 KernelSU-Next layout: measured 0/58 hunks), because the KernelSU fork we
+	# build already contains the whole thing:
+	#   kernel/Kconfig      -- the KSU_SUSFS* menu
+	#   kernel/supercalls.c -- CMD_SUSFS_* handlers
+	# Re-verify that here so a wrong KSU_REF fails loudly with the real reason.
+	if grep -q 'CMD_SUSFS_ADD_SUS_PATH' "$KSU_DIR/kernel/supercalls.c" 2>/dev/null &&
+	   grep -q 'config KSU_SUSFS$' "$KSU_DIR/kernel/Kconfig" 2>/dev/null; then
+		echo "   -> KernelSU SUSFS glue: provided by the KSU fork itself (no patch needed)"
 	else
-		fail_critical "missing $SUSFS_KP/KernelSU/10_enable_susfs_for_ksu.patch"
+		fail_critical "the KernelSU source in use has no SUSFS glue (see step 1a)."
 	fi
 
 	# 2b) Kernel-side susfs implementation
@@ -338,7 +365,7 @@ else
 		if ! apply_patch "$KERNEL_ROOT" "$SUSFS_KP/50_add_susfs_in_kernel-4.19.patch" \
 				"kernel susfs core (50_add_susfs_in_kernel-4.19)" \
 				"$KERNEL_ROOT/.patch-kernel-susfs.log"; then
-			fail_critical "kernel-side SUSFS patch did not apply cleanly."
+			echo "      (expected: the task_mmu.c and sched.h hunks, repaired below)"
 		fi
 	else
 		fail_critical "missing $SUSFS_KP/50_add_susfs_in_kernel-4.19.patch"
@@ -442,6 +469,44 @@ else
 		fail_critical "fs/proc/task_mmu.c not found"
 	fi
 
+	# ---------------------------------------------------------------------
+	# Repair the include/linux/sched.h hunks (both fail on this tree).
+	#
+	# 50_add_susfs_in_kernel-4.19.patch wants to turn two ANDROID_KABI_RESERVE()
+	# slots of struct task_struct into ANDROID_KABI_USE(...) holding
+	#     u64 susfs_task_state;
+	#     u64 susfs_last_fake_mnt_id;
+	# The earth tree's task_struct tail differs (it wraps reserve 6 in
+	# "#ifdef __GENKSYMS__", and MTK appends CONFIG_MTK_TASK_TURBO fields), so
+	# the patch's context does not match and neither hunk applies.
+	#
+	# On a non-GKI kernel there is no vendor kABI to preserve, so the plain
+	# fields are added at the end of the randomized section instead -- the same
+	# thing the patch does for kernels without ANDROID_KABI_RESERVE at all.
+	# Keeping the fields inside "<start> .. <end>" is what the patch intends.
+	# ---------------------------------------------------------------------
+	SCHED_H="$KERNEL_ROOT/include/linux/sched.h"
+	if [ -f "$SCHED_H" ]; then
+		if grep -q 'susfs_task_state' "$SCHED_H"; then
+			echo "   -> include/linux/sched.h already carries the susfs task fields"
+		elif grep -q 'randomized_struct_fields_end' "$SCHED_H"; then
+			echo "   -> repairing failed hunks: adding susfs fields to struct task_struct"
+			# The anchor line is indented in the kernel source ("\trandomized_..."),
+			# so the pattern must allow leading whitespace and re-indent the
+			# inserted lines to match.
+			sed -i 's|^\([[:space:]]*\)randomized_struct_fields_end[[:space:]]*$|\1#if defined(CONFIG_KSU_SUSFS)\n\1\tu64 susfs_task_state;\n\1\tu64 susfs_last_fake_mnt_id;\n\1#endif\n\1randomized_struct_fields_end|' "$SCHED_H"
+			if grep -q 'susfs_task_state' "$SCHED_H" && grep -q 'susfs_last_fake_mnt_id' "$SCHED_H"; then
+				echo "        verified: susfs_task_state + susfs_last_fake_mnt_id present"
+			else
+				fail_critical "could not add the susfs fields to include/linux/sched.h"
+			fi
+		else
+			fail_critical "include/linux/sched.h has no randomized_struct_fields_end anchor"
+		fi
+	else
+		fail_critical "include/linux/sched.h not found"
+	fi
+
 	# Prove the macro is now actually in scope for that translation unit:
 	# the include must exist AND the identifier must be used only under a
 	# guard that pulls it in.
@@ -523,60 +588,33 @@ else
 		cat <<'EOF'
 
 # >>> earth-ksu-susfs >>>
-# KernelSU-Next (non-GKI / legacy integration)
+# KernelSU (SUSFS-native fork, old layout / non-GKI)
 CONFIG_KSU=y
-CONFIG_EXT4_FS=y
-CONFIG_MODULES=y
-# CONFIG_KSU_MANUAL_HOOK is not set
-EOF
-
-		# Hook mode. The legacy Kconfig exposes a choice:
-		#   KSU_KPROBES_HOOK        tracepoint + kretprobe (upstream default,
-		#                           documented as "not below 5.10", but it is
-		#                           what non-GKI devices normally use)
-		#   KSU_SYSCALL_TABLE_HOOK  patch sys_call_table directly, for kernels
-		#                           where kprobes are unavailable/broken
-		case "$KSU_HOOK_MODE" in
-		kprobe)
-			cat <<'EOF'
-# hook mode: kprobe + tracepoint
+# No hook-mode choice in this Kconfig: hooks come from kprobes + LSM hooks.
 CONFIG_KPROBES=y
 CONFIG_KPROBE_EVENTS=y
-CONFIG_KSU_KPROBES_HOOK=y
+CONFIG_EXT4_FS=y
+CONFIG_MODULES=y
 EOF
-			;;
-		syscall_table)
-			cat <<'EOF'
-# hook mode: direct sys_call_table patching (no kprobe needed)
-# CONFIG_KSU_KPROBES_HOOK is not set
-CONFIG_KSU_SYSCALL_TABLE_HOOK=y
-EOF
-			;;
-		*)
-			fail_critical "unknown KSU_HOOK_MODE '$KSU_HOOK_MODE' (expected: kprobe or syscall_table)" >&2
-			;;
-		esac
 	} >>"$DEFCONFIG"
 
 	if [ "$SUSFS_ENABLE" = "1" ]; then
 		cat >>"$DEFCONFIG" <<'EOF'
 
-# SUSFS
+# SUSFS -- exactly the menu this KernelSU fork defines in kernel/Kconfig
+# (symbols such as KSU_SUSFS_AUTO_ADD_* / _HAS_MAGIC_MOUNT belong to other
+# forks and do not exist here; adding them would only add noise.)
 CONFIG_KSU_SUSFS=y
 CONFIG_KSU_SUSFS_SUS_PATH=y
 CONFIG_KSU_SUSFS_SUS_MOUNT=y
-CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
-CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
 CONFIG_KSU_SUSFS_SUS_KSTAT=y
-CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n
+CONFIG_KSU_SUSFS_SUS_MAP=y
 CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
 CONFIG_KSU_SUSFS_SPOOF_UNAME=y
 CONFIG_KSU_SUSFS_ENABLE_LOG=y
 CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
 CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
 CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
 EOF
 	fi
 
@@ -585,11 +623,10 @@ EOF
 EOF
 
 	if [ "$SUSFS_ENABLE" = "1" ]; then
-		echo "   -> KernelSU-Next + SUSFS switches appended to $DEFCONFIG_NAME"
+		echo "   -> KernelSU + SUSFS switches appended to $DEFCONFIG_NAME"
 	else
-		echo "   -> KernelSU-Next switches appended to $DEFCONFIG_NAME (SUSFS disabled)"
+		echo "   -> KernelSU switches appended to $DEFCONFIG_NAME (SUSFS disabled)"
 	fi
-	echo "   -> KernelSU hook mode: $KSU_HOOK_MODE"
 
 	# 4b) Keep the device's own local version string, but make builds
 	#     reproducible: CONFIG_LOCALVERSION_AUTO adds the git SHA/date to
