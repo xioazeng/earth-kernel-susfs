@@ -73,7 +73,13 @@ note_warning()   { echo "!! WARNING : $*"; WARNINGS=$((WARNINGS + 1)); }
 apply_patch() {
 	local dir="$1" file="$2" label="$3" log="$4"
 	echo "   -> applying $label"
-	if (cd "$dir" && patch -p1 --forward --batch --no-backup-if-mismatch <"$file" >"$log" 2>&1); then
+	# --fuzz=0 is deliberate: with the default fuzz, patch can land a hunk in a
+	# place that merely "looks similar", which is how the SUSFS sched.h hunk got
+	# applied 175 lines away from where it belonged (inside the
+	# "#ifdef __GENKSYMS__" block) and then defeated the repair that follows.
+	# Exact context only: anything that does not match is left as a .rej for the
+	# explicit repairs below to handle deterministically.
+	if (cd "$dir" && patch -p1 --fuzz=0 --forward --batch --no-backup-if-mismatch <"$file" >"$log" 2>&1); then
 		echo "      OK"
 		return 0
 	fi
@@ -487,21 +493,34 @@ else
 	# ---------------------------------------------------------------------
 	SCHED_H="$KERNEL_ROOT/include/linux/sched.h"
 	if [ -f "$SCHED_H" ]; then
-		if grep -q 'susfs_task_state' "$SCHED_H"; then
-			echo "   -> include/linux/sched.h already carries the susfs task fields"
-		elif grep -q 'randomized_struct_fields_end' "$SCHED_H"; then
-			echo "   -> repairing failed hunks: adding susfs fields to struct task_struct"
-			# The anchor line is indented in the kernel source ("\trandomized_..."),
-			# so the pattern must allow leading whitespace and re-indent the
-			# inserted lines to match.
-			sed -i 's|^\([[:space:]]*\)randomized_struct_fields_end[[:space:]]*$|\1#if defined(CONFIG_KSU_SUSFS)\n\1\tu64 susfs_task_state;\n\1\tu64 susfs_last_fake_mnt_id;\n\1#endif\n\1randomized_struct_fields_end|' "$SCHED_H"
-			if grep -q 'susfs_task_state' "$SCHED_H" && grep -q 'susfs_last_fake_mnt_id' "$SCHED_H"; then
-				echo "        verified: susfs_task_state + susfs_last_fake_mnt_id present"
+		# Check each field on its own. (An earlier revision tested only
+		# susfs_task_state and then skipped the whole repair -- exactly what
+		# happens when patch lands hunk 1 but not hunk 2.)
+		SCHED_MISSING=0
+		# Insert one field, keeping the anchor line's indentation.
+		add_sched_field() {
+			local field="$1"
+			sed -i "s|^\([[:space:]]*\)randomized_struct_fields_end[[:space:]]*\$|\1#if defined(CONFIG_KSU_SUSFS)\n\1\tu64 ${field};\n\1#endif\n\1randomized_struct_fields_end|" "$SCHED_H"
+		}
+		for field in susfs_task_state susfs_last_fake_mnt_id; do
+			if grep -q "\b${field}\b" "$SCHED_H"; then
+				echo "   -> include/linux/sched.h already has ${field}"
+			elif grep -q 'randomized_struct_fields_end' "$SCHED_H"; then
+				echo "   -> repairing failed hunk: adding ${field} to struct task_struct"
+				add_sched_field "$field"
+				if grep -q "\b${field}\b" "$SCHED_H"; then
+					echo "        verified: ${field} present"
+				else
+					fail_critical "could not add ${field} to include/linux/sched.h"
+					SCHED_MISSING=1
+				fi
 			else
-				fail_critical "could not add the susfs fields to include/linux/sched.h"
+				fail_critical "include/linux/sched.h has no randomized_struct_fields_end anchor"
+				SCHED_MISSING=1
 			fi
-		else
-			fail_critical "include/linux/sched.h has no randomized_struct_fields_end anchor"
+		done
+		if [ "$SCHED_MISSING" -eq 0 ]; then
+			echo "   -> susfs task fields OK (susfs_task_state, susfs_last_fake_mnt_id)"
 		fi
 	else
 		fail_critical "include/linux/sched.h not found"

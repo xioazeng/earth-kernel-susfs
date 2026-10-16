@@ -258,6 +258,15 @@ run_make -j"$JOBS" prepare
 # the drivers/kernelsu step below dies on "flask.h: No such file or directory".
 run_make -j"$JOBS" security/selinux/
 
+# Same story for include/generated/compile.h: the rule lives in init/Makefile
+# ("$(obj)/version.o: include/generated/compile.h") and KernelSU's ksuinit.c
+# includes <generated/compile.h>. In a normal build init/ is compiled long
+# before drivers/, so it exists by then; because this step deliberately builds
+# drivers/kernelsu first, that header has to be produced explicitly. Without it:
+#     ../drivers/kernelsu/ksuinit.c:8:10: fatal error:
+#     'generated/compile.h' file not found
+run_make -j"$JOBS" init/version.o
+
 # Now parse (and build) drivers/kernelsu. This is the step that applies the
 # patches listed above -- the Kbuild does it while make parses it -- and because
 # it happens here, fs/, security/ and everything else are still uncompiled and
