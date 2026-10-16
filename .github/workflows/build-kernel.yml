@@ -1,0 +1,263 @@
+name: Build earth kernel (KernelSU-Next + SUSFS + Droidspaces)
+
+# =============================================================================
+#  Xiaomi Redmi 12C / Poco C55  ("earth", MediaTek MT6768)
+#  Base tree : LineageOS/android_kernel_xiaomi_earth @ lineage-21  (Linux 4.19)
+#  Features  : KernelSU-Next v3.4.2 + SUSFS (kernel-4.19) + Droidspaces
+#  Output    : flashable boot.img (kernel swapped inside your stock boot.img)
+#              + raw Image.gz-dtb and the full build log
+#
+#  How to run:
+#    Actions -> "Build earth kernel ..." -> Run workflow
+#
+#  To get a flashable boot.img you must supply your stock boot.img, in one of
+#  two ways (see README "云端编译完整教程"):
+#    A) commit it to the repo root as  stock-boot.img      <-- easiest
+#    B) or paste a direct download URL into stock_boot_img_url at dispatch
+# =============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_repo:
+        description: 'Kernel source repository'
+        required: false
+        default: 'LineageOS/android_kernel_xiaomi_earth'
+      kernel_ref:
+        description: 'Kernel branch/tag/commit'
+        required: false
+        default: 'lineage-21'
+      defconfig:
+        description: 'Defconfig name (without _defconfig)'
+        required: false
+        default: 'earth'
+      kernelsu_ref:
+        description: 'KernelSU-Next ref (tag/branch/commit)'
+        required: false
+        default: 'v3.4.2'
+      susfs_ref:
+        description: 'SUSFS branch (susfs4ksu)'
+        required: false
+        default: 'kernel-4.19'
+      clang_version:
+        description: 'AOSP prebuilt clang version'
+        required: false
+        default: 'clang-r487747c'
+      stock_boot_img_url:
+        description: 'Direct download URL of YOUR stock boot.img (optional; see tutorial)'
+        required: false
+        default: ''
+
+# Manual runs only. No push trigger on purpose: a push would start a build
+# with an empty stock_boot_img_url, producing no boot.img and confusing things.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build kernel
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout build kit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Show environment
+        run: |
+          echo "runner CPUs : $(nproc)"
+          echo "disk        : $(df -h / | tail -1)"
+          echo "memory      : $(free -h | head -2)"
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" 2>/dev/null || true
+          df -h /
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
+            git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev \
+            lib32z1-dev libelf-dev liblz4-tool libncurses5 libncurses5-dev \
+            libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush \
+            rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 \
+            unzip device-tree-compiler cpio
+
+      - name: Checkout kernel source
+        run: |
+          git clone --depth 1 --branch "${{ inputs.kernel_ref || 'lineage-21' }}" \
+            "https://github.com/${{ inputs.kernel_repo || 'LineageOS/android_kernel_xiaomi_earth' }}.git" \
+            kernel
+          echo "KERNEL_SHA=$(git -C kernel rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "kernel HEAD: $(git -C kernel rev-parse --short HEAD)"
+          sed -n '1,6p' kernel/Makefile
+
+      - name: Download AOSP clang toolchain
+        run: |
+          CLANG_VER="${{ inputs.clang_version || 'clang-r487747c' }}"
+          mkdir -p toolchains
+          echo "downloading $CLANG_VER ..."
+          curl -fsSL "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VER}.tar.gz" \
+            -o clang.tar.gz
+          mkdir -p "toolchains/$CLANG_VER"
+          tar -xzf clang.tar.gz -C "toolchains/$CLANG_VER"
+          rm -f clang.tar.gz
+          echo "CLANG_PATH=$PWD/toolchains/$CLANG_VER" >> "$GITHUB_ENV"
+          "$PWD/toolchains/$CLANG_VER/bin/clang" --version | head -2
+
+      - name: Download GCC cross toolchains
+        run: |
+          GCC64="aarch64--glibc--stable-2022.03-1"
+          GCC32="arm--glibc--stable-2022.03-1"
+          curl -fsSL "https://toolchains.bootlin.com/downloads/releases/toolchains/aarch64/tarballs/${GCC64}.tar.xz" -o gcc64.tar.xz
+          curl -fsSL "https://toolchains.bootlin.com/downloads/releases/toolchains/arm/tarballs/${GCC32}.tar.xz" -o gcc32.tar.xz
+          mkdir -p toolchains
+          tar -xf gcc64.tar.xz -C toolchains
+          tar -xf gcc32.tar.xz -C toolchains
+          rm -f gcc64.tar.xz gcc32.tar.xz
+          echo "GCC64_PATH=$PWD/toolchains/${GCC64}" >> "$GITHUB_ENV"
+          echo "GCC32_PATH=$PWD/toolchains/${GCC32}" >> "$GITHUB_ENV"
+          ls toolchains
+
+      - name: Download Android build-tools (mkdtimg / libufdt)
+        run: |
+          git clone --depth 1 --branch main \
+            https://android.googlesource.com/platform/system/libufdt build-tools/libufdt
+          echo "BUILDTOOLS_PATH=$PWD/build-tools" >> "$GITHUB_ENV"
+          ls build-tools/libufdt | head
+
+      - name: Integrate KernelSU-Next + SUSFS + Droidspaces
+        env:
+          DEFCONFIG: ${{ inputs.defconfig || 'earth' }}
+        run: |
+          chmod +x scripts/*.sh
+          ./scripts/setup-kernel.sh "$PWD/kernel" 2>&1 | tee setup.log
+          echo "--- patch reject files (if any) ---"
+          find kernel -name '*.rej' | head -50 || true
+
+      - name: Build kernel
+        env:
+          DEFCONFIG: ${{ inputs.defconfig || 'earth' }}
+        run: |
+          JOBS="$(nproc)"
+          JOBS="$JOBS" ./scripts/build.sh "$PWD/kernel" 2>&1 | tee build.log
+
+      - name: Prepare stock boot.img
+        id: bootimg
+        env:
+          BOOT_URL: ${{ inputs.stock_boot_img_url || '' }}
+        run: |
+          set -euo pipefail
+          HAVE=0
+          # Priority 1: a stock-boot.img committed at the repo root.
+          if [ -f "stock-boot.img" ]; then
+            echo "using committed stock-boot.img"
+            cp stock-boot.img stock.img
+            HAVE=1
+          # Priority 2: an explicit download URL given at dispatch time.
+          elif [ -n "${BOOT_URL}" ]; then
+            echo "downloading stock boot.img from the supplied URL"
+            if curl -fL --retry 3 --retry-delay 2 "${BOOT_URL}" -o stock.img; then
+              HAVE=1
+            else
+              echo "::error title=boot.img download failed::Could not download the boot.img URL. Check that the link is a direct, public download link."
+            fi
+          fi
+
+          if [ "$HAVE" -eq 0 ]; then
+            echo "have=0" >> "$GITHUB_OUTPUT"
+            echo "::warning title=No boot.img::No stock boot.img provided - only the raw kernel image will be built. Flashable boot.img will be skipped."
+            exit 0
+          fi
+
+          echo "have=1" >> "$GITHUB_OUTPUT"
+          ls -la stock.img
+          echo "--- sanity check (Android boot images start with the ANDROID! magic) ---"
+          MAGIC=$(head -c 8 stock.img | tr -d '\0' || true)
+          echo "magic bytes: '${MAGIC}'"
+          if [ "$MAGIC" != "ANDROID!" ]; then
+            echo "::error title=Not a valid boot.img::The file does not start with 'ANDROID!'. It is probably not a raw Android boot image, or the download returned an HTML page instead of the file."
+            exit 1
+          fi
+          echo "boot.img magic OK"
+
+      - name: Download magiskboot
+        if: steps.bootimg.outputs.have == '1'
+        run: |
+          MAGISK_VER=$(curl -fsSL https://api.github.com/repos/topjohnwu/Magisk/releases/latest \
+            | grep -oP '"tag_name":\s*"\K[^"]+' | head -1)
+          echo "Magisk $MAGISK_VER"
+          curl -fsSL "https://github.com/topjohnwu/Magisk/releases/download/${MAGISK_VER}/Magisk-${MAGISK_VER#v}.apk" -o magisk.apk
+          mkdir -p magiskboot-dir
+          unzip -o -j magisk.apk 'lib/x86_64/libmagiskboot.so' -d magiskboot-dir
+          mv magiskboot-dir/libmagiskboot.so magiskboot-dir/magiskboot
+          chmod +x magiskboot-dir/magiskboot
+          echo "$PWD/magiskboot-dir" >> "$GITHUB_PATH"
+          ./magiskboot-dir/magiskboot 2>&1 | head -3 || true
+
+      - name: Repack boot.img
+        if: steps.bootimg.outputs.have == '1'
+        run: |
+          NEW_KERNEL="$(ls kernel/dist/Image.gz-dtb 2>/dev/null || ls kernel/dist/Image.gz 2>/dev/null | head -1)"
+          echo "using kernel payload: $NEW_KERNEL"
+          chmod +x scripts/repack-bootimg.sh
+          ./scripts/repack-bootimg.sh stock.img "$NEW_KERNEL" earth-boot-new.img 2>&1 | tee repack.log
+          ls -la earth-boot-new.img
+
+      - name: Summarize results
+        if: always()
+        run: |
+          {
+            echo "## earth kernel build"
+            echo ""
+            echo "| item | value |"
+            echo "|---|---|"
+            echo "| kernel repo | \`${{ inputs.kernel_repo || 'LineageOS/android_kernel_xiaomi_earth' }}\` |"
+            echo "| kernel ref | \`${{ inputs.kernel_ref || 'lineage-21' }}\` |"
+            echo "| kernel commit | \`${KERNEL_SHA}\` |"
+            echo "| KernelSU-Next | \`${{ inputs.kernelsu_ref || 'v3.4.2' }}\` |"
+            echo "| SUSFS | \`${{ inputs.susfs_ref || 'kernel-4.19' }}\` |"
+            echo "| clang | \`${{ inputs.clang_version || 'clang-r487747c' }}\` |"
+            echo "| stock boot.img | ${{ steps.bootimg.outputs.have == '1' && 'provided - boot.img will be produced' || 'not provided - raw kernel only' }} |"
+            echo ""
+            echo '### Artifacts'
+            echo '```'
+            ls -la kernel/dist 2>/dev/null || echo 'no dist dir'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload kernel images
+        uses: actions/upload-artifact@v4
+        with:
+          name: earth-kernel-images
+          path: |
+            kernel/dist/Image.gz-dtb
+            kernel/dist/Image.gz
+            kernel/dist/Image
+            kernel/dist/kernel.config
+            kernel/dist/kernel.release
+          if-no-files-found: warn
+
+      - name: Upload flashable boot.img
+        if: steps.bootimg.outputs.have == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: earth-boot-img
+          path: earth-boot-new.img
+          if-no-files-found: error
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: earth-build-logs
+          path: |
+            setup.log
+            build.log
+            repack.log
+          if-no-files-found: warn
