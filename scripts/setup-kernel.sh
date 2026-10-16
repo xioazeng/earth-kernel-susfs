@@ -57,8 +57,10 @@ KERNEL_ROOT="$(cd "$KERNEL_ROOT" && pwd)"
 # (susfs_add_sus_map, susfs_set_avc_log_spoofing, susfs_add_sus_path_loop,
 # susfs_set_current_proc_umounted, ...) because there is no SUSFS 2.x branch for
 # 4.19 at all. `deprecated/susfs-legacy` leaves 0.
-KSU_REPO="${KSU_REPO:-https://github.com/rsuntk/KernelSU.git}"
-KSU_REF="${KSU_REF:-deprecated/susfs-legacy}"
+KSU_REPO="${KSU_REPO:-https://github.com/Oscar1640/android_kernel_xiaomi_earth.git}"
+KSU_REF="${KSU_REF:-ksu-next}"
+# NOTE: this is a whole kernel tree, not a KernelSU-only repo -- the KernelSU
+# sources live in drivers/kernelsu/ and are sparse-cloned from it (step 1).
 
 # KernelSU hooks: this layout has no hook-mode Kconfig choice -- it uses the
 # kernel's kprobes (CONFIG_KPROBES) plus LSM hooks, which is what 4.19 needs.
@@ -141,28 +143,40 @@ if [ -d "$KSU_DIR" ]; then
 	rm -rf "$KSU_DIR"
 fi
 
-if ! git clone --depth 1 --branch "$KSU_REF" "$KSU_REPO" "$KSU_DIR" 2>/dev/null; then
-	# Not a branch/tag name: treat it as a commit SHA so builds can be pinned
-	# to an exact revision (GitHub serves fetches of individual commits).
-	echo "   -> '$KSU_REF' is not a branch/tag, retrying as a commit SHA"
+# Sparse + blobless clone: the source repo is a ~1.9 GB kernel tree and we only
+# need drivers/kernelsu. The commit history is kept on purpose -- this
+# generation of kernel/Makefile derives KSU_VERSION from
+#     git rev-list --count HEAD
+# so a --depth 1 clone would report version 10199 and the manager would call the
+# kernel too old. Blobs are fetched on demand, so the checkout stays tiny.
+if ! git clone --filter=blob:none --sparse --branch "$KSU_REF" "$KSU_REPO" "$KSU_DIR" 2>/dev/null; then
+	echo "   -> sparse/filtered clone unavailable, retrying as a commit/plain clone"
 	rm -rf "$KSU_DIR"
-	git clone --depth 1 "$KSU_REPO" "$KSU_DIR"
-	git -C "$KSU_DIR" fetch --depth 1 origin "$KSU_REF"
-	git -C "$KSU_DIR" checkout --detach FETCH_HEAD
+	if ! git clone --branch "$KSU_REF" --single-branch "$KSU_REPO" "$KSU_DIR" 2>/dev/null; then
+		git clone --filter=blob:none "$KSU_REPO" "$KSU_DIR"
+		git -C "$KSU_DIR" checkout --detach "$KSU_REF"
+	fi
 fi
+git -C "$KSU_DIR" sparse-checkout set drivers/kernelsu 2>/dev/null || true
+
+KSU_SRC="$KSU_DIR/drivers/kernelsu"
 KSU_DESC=$(git -C "$KSU_DIR" describe --tags --always 2>/dev/null || echo "$KSU_REF")
 KSU_SHA=$(git -C "$KSU_DIR" rev-parse HEAD 2>/dev/null || echo unknown)
 KSU_BRANCH=$(git -C "$KSU_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo detached)
+KSU_GITCOUNT=$(git -C "$KSU_DIR" rev-list --count HEAD 2>/dev/null || echo 0)
 echo "   -> cloned $KSU_DESC  (ref=$KSU_BRANCH sha=$KSU_SHA)"
+echo "   -> commit count $KSU_GITCOUNT => KernelSU version $((10000 + KSU_GITCOUNT + 198)) (manager must be >= this)"
 
-# The old ("pre-v3") KernelSU layout keeps everything directly under kernel/,
-# and that is the layout the classic susfs4ksu patches expect.
-if [ ! -f "$KSU_DIR/kernel/Kconfig" ] || [ ! -f "$KSU_DIR/kernel/Makefile" ]; then
-	fail_critical "KernelSU old layout not found: $KSU_DIR/kernel/{Kconfig,Makefile} missing."
-	echo "   directory listing of $KSU_DIR:"
+# KernelSU-Next 1.0.x layout: Kconfig, Makefile and the .c files sit directly
+# in the directory we symlink into the kernel tree.
+if [ ! -f "$KSU_SRC/Kconfig" ] || [ ! -f "$KSU_SRC/Makefile" ]; then
+	fail_critical "KernelSU sources not found: $KSU_SRC/{Kconfig,Makefile} missing."
+	echo "   listing of $KSU_DIR:"
 	ls -la "$KSU_DIR" | sed 's/^/      /' || true
+	echo "   listing of $KSU_SRC:"
+	ls -la "$KSU_SRC" 2>/dev/null | sed 's/^/      /' || true
 else
-	echo "   -> old KernelSU layout confirmed (kernel/Kconfig + kernel/Makefile)"
+	echo "   -> KernelSU sources confirmed ($KSU_SRC)"
 fi
 
 # -----------------------------------------------------------------------------
@@ -174,12 +188,12 @@ fi
 # the exact failure this check exists to prevent.
 # -----------------------------------------------------------------------------
 KSU_SUSFS_OK=1
-if ! grep -q 'config KSU_SUSFS$' "$KSU_DIR/kernel/Kconfig" 2>/dev/null; then
+if ! grep -q 'config KSU_SUSFS$' "$KSU_SRC/Kconfig" 2>/dev/null; then
 	KSU_SUSFS_OK=0
 fi
 # The command handlers moved between generations (core_hook.c here, supercalls.c
 # in the newer SUSFS-2.x branches), so search the whole kernel tree.
-if ! grep -rqs 'CMD_SUSFS_ADD_SUS_PATH' "$KSU_DIR/kernel" 2>/dev/null; then
+if ! grep -rqs 'CMD_SUSFS_ADD_SUS_PATH' "$KSU_SRC" 2>/dev/null; then
 	KSU_SUSFS_OK=0
 fi
 if [ "$KSU_SUSFS_OK" -eq 1 ]; then
@@ -209,10 +223,10 @@ fi
 # -----------------------------------------------------------------------------
 # The arch header moved between KernelSU generations: kernel/arch.h (old layout,
 # what this kit uses) vs kernel/include/arch.h (v3 layout).
-if [ -f "$KSU_DIR/kernel/include/arch.h" ]; then
-	KSU_INC_DIR="$KSU_DIR/kernel/include"
+if [ -f "$KSU_SRC/include/arch.h" ]; then
+	KSU_INC_DIR="$KSU_SRC/include"
 else
-	KSU_INC_DIR="$KSU_DIR/kernel"
+	KSU_INC_DIR="$KSU_SRC"
 fi
 KSU_ARCH_H="$KSU_INC_DIR/arch.h"
 KSU_419_H="$KSU_INC_DIR/ksu_419_compat.h"
@@ -294,7 +308,7 @@ if [ ! -f "$KERNEL_ROOT/include/linux/pgtable.h" ]; then
 		sed -i 's|^#include <linux/pgtable.h>$|\/* 4.19: linux/pgtable.h is 5.8+, asm/pgtable.h is the local equivalent *\/\n#include <asm/pgtable.h>|' "$f"
 		echo "      patched $f"
 		PG_FIXED=$((PG_FIXED + 1))
-	done < <(grep -rl '^#include <linux/pgtable.h>$' "$KSU_DIR/kernel" 2>/dev/null || true)
+	done < <(grep -rl '^#include <linux/pgtable.h>$' "$KSU_SRC" 2>/dev/null || true)
 	if [ "$PG_FIXED" -eq 0 ]; then
 		echo "   -> no unguarded linux/pgtable.h include found (nothing to fix)"
 	else
@@ -303,7 +317,7 @@ if [ ! -f "$KERNEL_ROOT/include/linux/pgtable.h" ]; then
 fi
 
 # Provide the exact paths legacy setup.sh creates.
-ln -sfn "$KSU_DIR/kernel" "$KERNEL_ROOT/drivers/kernelsu"
+ln -sfn "$KSU_SRC" "$KERNEL_ROOT/drivers/kernelsu"
 echo "   -> symlink: drivers/kernelsu -> KernelSU/kernel"
 
 if ! grep -q 'kernelsu' "$KERNEL_ROOT/drivers/Makefile"; then
@@ -340,7 +354,7 @@ if [ "$SUSFS_ENABLE" != "1" ]; then
 	# includes <linux/susfs.h> and calls susfs_* directly, so skipping SUSFS
 	# means a wall of "implicit declaration" errors. Fail here with the reason
 	# instead of letting the KSU compile die later.
-	if grep -rqs 'linux/susfs\.h\|linux/susfs_def\.h' "$KSU_DIR/kernel" 2>/dev/null; then
+	if grep -rqs 'linux/susfs\.h\|linux/susfs_def\.h' "$KSU_SRC" 2>/dev/null; then
 		fail_critical "KSU_REF '$KSU_REF' requires the SUSFS kernel-side patch."
 		echo "      Its sources include <linux/susfs.h>, so SUSFS_ENABLE=1 is"
 		echo "      mandatory with this KernelSU source."
@@ -370,8 +384,8 @@ else
 	# generation, kernel/supercalls.c in the newer SUSFS-2.x ones). Step 1a
 	# already verified that tree-wide; repeat it briefly so this stage is
 	# self-contained.
-	if grep -rqs 'CMD_SUSFS_ADD_SUS_PATH' "$KSU_DIR/kernel" 2>/dev/null &&
-	   grep -q 'config KSU_SUSFS$' "$KSU_DIR/kernel/Kconfig" 2>/dev/null; then
+	if grep -rqs 'CMD_SUSFS_ADD_SUS_PATH' "$KSU_SRC" 2>/dev/null &&
+	   grep -q 'config KSU_SUSFS$' "$KSU_SRC/Kconfig" 2>/dev/null; then
 		echo "   -> KernelSU SUSFS glue: provided by the KSU source itself (no patch needed)"
 	else
 		fail_critical "the KernelSU source in use has no SUSFS glue (see step 1a)."
@@ -601,6 +615,63 @@ echo
 # =============================================================================
 # 4) Config: KernelSU + SUSFS switches + Droidspaces fragment
 # =============================================================================
+# -----------------------------------------------------------------------------
+# 3b) Vendor VINTF (FCM) requirement: CONFIG_TRACE_GPU_MEM
+#
+# /system/etc/vintf/compatibility_matrix.6.xml, section <kernel version="4.19.191">,
+# requires CONFIG_TRACE_GPU_MEM=y. This LineageOS-based tree has no such symbol,
+# and a missing requirement makes Android show
+#     "There's an internal problem with your device. Contact your manufacturer
+#      for details."
+# at every boot. The sources are vendored in this repo (trace-gpu-mem/), taken
+# from a kernel that already boots this device without that dialog.
+# -----------------------------------------------------------------------------
+install_trace_gpu_mem() {
+	local tsrc="$SCRIPT_DIR/../trace-gpu-mem"
+	if [ ! -f "$tsrc/trace_gpu_mem.c" ] || [ ! -f "$tsrc/include/trace/events/gpu_mem.h" ]; then
+		fail_critical "trace-gpu-mem/ sources are missing from the kit"
+		return 1
+	fi
+	mkdir -p "$KERNEL_ROOT/drivers/gpu/trace" "$KERNEL_ROOT/include/trace/events"
+	cp -f "$tsrc/trace_gpu_mem.c" "$KERNEL_ROOT/drivers/gpu/trace/trace_gpu_mem.c"
+	cp -f "$tsrc/include/trace/events/gpu_mem.h" "$KERNEL_ROOT/include/trace/events/gpu_mem.h"
+
+	# Upstream's Kconfig entry is a prompt-less bool (only reachable through
+	# `select`), which a defconfig cannot turn on. Give it a prompt and default
+	# it to y so CONFIG_TRACE_GPU_MEM=y really lands in .config.
+	cat >"$KERNEL_ROOT/drivers/gpu/trace/Kconfig" <<'EOF'
+# SPDX-License-Identifier: GPL-2.0-only
+config TRACE_GPU_MEM
+	bool "GPU memory tracepoints"
+	default y
+	help
+	  Tracepoints for GPU memory usage (trace/events/gpu_mem.h). The vendor
+	  VINTF compatibility matrix of this device requires this option, so it
+	  must stay enabled.
+EOF
+	cat >"$KERNEL_ROOT/drivers/gpu/trace/Makefile" <<'EOF'
+# SPDX-License-Identifier: GPL-2.0-only
+obj-$(CONFIG_TRACE_GPU_MEM) += trace_gpu_mem.o
+EOF
+
+	# hook 1: let drivers/gpu/ descend into trace/
+	if ! grep -q 'CONFIG_TRACE_GPU_MEM' "$KERNEL_ROOT/drivers/gpu/Makefile" 2>/dev/null; then
+		printf 'obj-$(CONFIG_TRACE_GPU_MEM)\t\t+= trace/\n' >>"$KERNEL_ROOT/drivers/gpu/Makefile"
+	fi
+	# hook 2: make that Kconfig visible to the config system
+	if ! grep -qs 'drivers/gpu/trace/Kconfig' "$KERNEL_ROOT/drivers/Kconfig" 2>/dev/null; then
+		printf '\nsource "drivers/gpu/trace/Kconfig"\n' >>"$KERNEL_ROOT/drivers/Kconfig"
+	fi
+
+	# and select it in the config we actually build with
+	local dc="$KERNEL_ROOT/arch/arm64/configs/${DEFCONFIG:-earth}_defconfig"
+	if [ -f "$dc" ] && ! grep -q '^CONFIG_TRACE_GPU_MEM=y$' "$dc"; then
+		printf '\n# vendor VINTF requirement (driver vendored under trace-gpu-mem/)\nCONFIG_TRACE_GPU_MEM=y\n' >>"$dc"
+	fi
+	echo "   -> TRACE_GPU_MEM vendored (driver + Kconfig/Makefile hooks + defconfig)"
+}
+install_trace_gpu_mem
+
 echo "[4/4] Kernel configuration"
 
 # 4a) KernelSU / SUSFS switches go straight into the device defconfig.
@@ -618,10 +689,11 @@ else
 		cat <<'EOF'
 
 # >>> earth-ksu-susfs >>>
-# KernelSU (SUSFS-era generation, old layout / non-GKI)
+# KernelSU-Next 1.0.x (old layout / non-GKI, built into the kernel)
 CONFIG_KSU=y
-# Manual hooking is for GKI kernels without kprobes; we have kprobes.
-# CONFIG_KSU_MANUAL_HOOK is not set
+# This generation selects its hook style with KSU_WITH_KPROBES (kprobe hooks on
+# the syscall/setuid paths). We have kprobes, so we do not need manual hooks.
+CONFIG_KSU_WITH_KPROBES=y
 CONFIG_KPROBES=y
 CONFIG_KPROBE_EVENTS=y
 CONFIG_EXT4_FS=y
@@ -632,7 +704,7 @@ EOF
 	if [ "$SUSFS_ENABLE" = "1" ]; then
 		cat >>"$DEFCONFIG" <<'EOF'
 
-# SUSFS -- the classic menu this KernelSU generation defines in kernel/Kconfig
+# SUSFS -- the menu this KernelSU generation defines in drivers/kernelsu/Kconfig
 CONFIG_KSU_SUSFS=y
 CONFIG_KSU_SUSFS_SUS_PATH=y
 CONFIG_KSU_SUSFS_SUS_MOUNT=y
@@ -648,6 +720,7 @@ CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
 CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
 CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
 CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+CONFIG_KSU_SUSFS_SUS_SU=y
 EOF
 	fi
 
