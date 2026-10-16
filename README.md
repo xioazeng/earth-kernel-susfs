@@ -222,23 +222,27 @@ adb shell cat /proc/version
 
 ## 6. 已知风险与应对（请务必读）
 
-### 风险 1：SUSFS 内核侧补丁有 3 个 hunk 打不上（已自动修复）
+### 风险 1：SUSFS 内核侧补丁有 2 个 hunk 打不上（已自动修复）
 
-`50_add_susfs_in_kernel-4.19.patch` 在这棵 LineageOS 树上实测 **69/72 hunk 直接可用**，
-3 个失败项已经由 `setup-kernel.sh` 自动补上：
+`50_add_susfs_in_kernel-4.19.patch` 在这棵 LineageOS 树上实测 **70/72 hunk 可用**
+（其余 hunk 只是行号偏移，`patch` 自己会处理），2 个失败项由 `setup-kernel.sh` 自动补：
 
-1. `fs/proc/task_mmu.c` —— 补丁想加 `#include <linux/susfs_def.h>`，但周围上下文移动了；
+1. `fs/proc/task_mmu.c` hunk #1 —— 补丁想加 `#include <linux/susfs_def.h>`，但周围上下文移动了；
    脚本会在首个 `asm/` include 前幂等插入（否则后面会报 `INODE_STATE_SUS_KSTAT` 未定义）。
-2. `include/linux/sched.h` 的**两个** hunk —— 补丁想把 `struct task_struct` 里两个
-   `ANDROID_KABI_RESERVE()` 换成 `ANDROID_KABI_USE(...)` 承载
-   `susfs_task_state` / `susfs_last_fake_mnt_id`，但这棵树的 tail 不同（reserve 6 被
-   `#ifdef __GENKSYMS__` 包着，后面还有 MTK 的 `CONFIG_MTK_TASK_TURBO` 字段）。
-   非 GKI 内核没有 vendor kABI 需要保，所以脚本改为把这两个 `u64` 字段加在
-   `randomized_struct_fields_end` 之前（正是补丁在无 `ANDROID_KABI_RESERVE` 时的做法）。
+2. `include/linux/sched.h` hunk #2 —— 补丁想把 `ANDROID_KABI_RESERVE(8)` 换成
+   `ANDROID_KABI_USE(8, u64 susfs_last_fake_mnt_id)` 并在随机化段尾补两个字段，
+   但这棵树的 tail 被 MTK 改过（多了 `CONFIG_MTK_TASK_TURBO` 字段）。
+   非 GKI 内核没有 vendor kABI 要保，所以脚本改为把缺失的字段单独加在
+   `randomized_struct_fields_end` 之前（= 补丁在无 `ANDROID_KABI_RESERVE` 时的做法）。
+   hunk #1（`susfs_task_state`）能正常应用，脚本只补缺的那一个，不会重复定义。
 
-**注意**：`setup.log` 里那行 `PATCH FAILED` 现在属于**预期**，紧接着就会打印修复结果；
-只要末尾是 `RESULT: OK` 且能看到 `verified: susfs_task_state + susfs_last_fake_mnt_id present`
-就说明修复到位。
+**重要**：套件用 `patch --fuzz=0` 打这个补丁。默认 fuzz 允许"上下文像就贴上去"——
+之前正是它把 sched.h 的 hunk 贴到了别处，让随后的修复误判为"字段已存在"。
+fuzz=0 之后失败项是确定的，修复逻辑才有意义。
+
+所以 `setup.log` 里看到 `PATCH FAILED (reject files found: 2)` 是**预期**，紧接着会打印
+修复结果；只要末尾是 `RESULT: OK`，并且能看到 `verified: susfs_last_fake_mnt_id present`
+或 `already has susfs_task_state` + `verified: susfs_last_fake_mnt_id present`，就说明到位了。
 
 ### 风险 2：SUSFS 与内核的 `ANDROID_KABI_*` / MTK 字段差异
 
