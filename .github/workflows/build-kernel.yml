@@ -33,21 +33,17 @@ on:
         required: false
         default: 'earth'
       kernelsu_ref:
-        description: 'KernelSU-Next ref. Must be non-GKI: "legacy" branch or a "<ver>-legacy" tag/commit. Main-branch tags (v3.4.x) do NOT build on 4.19.'
+        description: 'KernelSU ref. Must be a SUSFS-native fork/branch, e.g. the default rsuntk/KernelSU "susfs-rksu-master".'
         required: false
-        default: 'legacy'
-      ksu_hook:
-        description: 'KernelSU hook mode: kprobe (default) or syscall_table (use if kprobe bootloops on this device)'
-        required: false
-        default: 'kprobe'
+        default: 'susfs-rksu-master'
       susfs_ref:
         description: 'SUSFS branch (susfs4ksu)'
         required: false
         default: 'kernel-4.19'
       susfs_enable:
-        description: 'Apply SUSFS (1 = yes, 0 = KernelSU-Next only). Port in progress.'
+        description: 'Apply SUSFS (1 = yes, default). 0 builds KernelSU only, without the SUSFS kernel-side patch.'
         required: false
-        default: '0'
+        default: '1'
       jobs:
         description: 'Parallel make jobs (default 3; higher is faster but can OOM the runner)'
         required: false
@@ -162,9 +158,8 @@ jobs:
       - name: Integrate KernelSU-Next + SUSFS + Droidspaces
         env:
           DEFCONFIG: ${{ inputs.defconfig || 'earth' }}
-          SUSFS_ENABLE: ${{ inputs.susfs_enable || '0' }}
-          KSU_REF: ${{ inputs.kernelsu_ref || 'legacy' }}
-          KSU_HOOK_MODE: ${{ inputs.ksu_hook || 'kprobe' }}
+          SUSFS_ENABLE: ${{ inputs.susfs_enable || '1' }}
+          KSU_REF: ${{ inputs.kernelsu_ref || 'susfs-rksu-master' }}
         run: |
           # pipefail matters: without it the exit status of "script | tee log"
           # is tee's, so a failing script still reports a green step and the job
@@ -179,8 +174,7 @@ jobs:
         timeout-minutes: 180
         env:
           DEFCONFIG: ${{ inputs.defconfig || 'earth' }}
-          SUSFS_ENABLE: ${{ inputs.susfs_enable || '0' }}
-          KSU_HOOK_MODE: ${{ inputs.ksu_hook || 'kprobe' }}
+          SUSFS_ENABLE: ${{ inputs.susfs_enable || '1' }}
           JOBS: ${{ inputs.jobs || '3' }}
         run: |
           # The build output streams live (see scripts/build.sh), so this step
@@ -307,9 +301,8 @@ jobs:
             echo "| kernel repo | \`${{ inputs.kernel_repo || 'LineageOS/android_kernel_xiaomi_earth' }}\` |"
             echo "| kernel ref | \`${{ inputs.kernel_ref || 'lineage-21' }}\` |"
             echo "| kernel commit | \`${KERNEL_SHA}\` |"
-            echo "| KernelSU-Next | \`${{ inputs.kernelsu_ref || 'legacy' }}\` (non-GKI legacy) |"
-            echo "| KSU hook mode | \`${{ inputs.ksu_hook || 'kprobe' }}\` |"
-            echo "| SUSFS | \`${{ inputs.susfs_ref || 'kernel-4.19' }}\` (enabled: \`${{ inputs.susfs_enable || '0' }}\`) |"
+            echo "| KernelSU | \`${{ inputs.kernelsu_ref || 'susfs-rksu-master' }}\` (SUSFS-native fork) |"
+            echo "| SUSFS | \`${{ inputs.susfs_ref || 'kernel-4.19' }}\` (enabled: \`${{ inputs.susfs_enable || '1' }}\`) |"
             echo "| clang | \`clang-r416183b\` (LineageOS prebuilt for kernel 4.19) |"
             echo "| stock boot.img | ${{ steps.bootimg.outputs.have == '1' && 'provided - boot.img will be produced' || 'not provided - raw kernel only' }} |"
             echo ""
