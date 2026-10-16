@@ -322,8 +322,8 @@ echo
 # SUSFS_ENABLE=1 (default) applies it; SUSFS_ENABLE=0 skips it entirely.
 #
 # Division of labour:
-#   * KSU side  -- already inside the KernelSU fork we build (kernel/Kconfig
-#                  menu + CMD_SUSFS_* handlers in kernel/supercalls.c), verified
+#   * KSU side  -- already inside the KernelSU branch we build (the KSU_SUSFS*
+#                  menu in kernel/Kconfig plus the CMD_SUSFS_* handlers), verified
 #                  in step 1a above. Nothing to patch here.
 #   * kernel side -- the classic susfs4ksu kernel-4.19 patch set: fs/* hooks via
 #                  50_add_susfs_in_kernel-4.19.patch plus fs/susfs.c and the
@@ -364,14 +364,15 @@ else
 	#
 	# susfs4ksu ships kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch for
 	# the old KernelSU layout. We no longer need it (and it does not apply to the
-	# v3 KernelSU-Next layout: measured 0/58 hunks), because the KernelSU fork we
-	# build already contains the whole thing:
-	#   kernel/Kconfig      -- the KSU_SUSFS* menu
-	#   kernel/supercalls.c -- CMD_SUSFS_* handlers
-	# Re-verify that here so a wrong KSU_REF fails loudly with the real reason.
-	if grep -q 'CMD_SUSFS_ADD_SUS_PATH' "$KSU_DIR/kernel/supercalls.c" 2>/dev/null &&
+	# v3 KernelSU-Next layout: measured 0/58 hunks), because the KernelSU branch we
+	# build already contains the whole thing -- the KSU_SUSFS* menu in
+	# kernel/Kconfig and the CMD_SUSFS_* handlers (kernel/core_hook.c in this
+	# generation, kernel/supercalls.c in the newer SUSFS-2.x ones). Step 1a
+	# already verified that tree-wide; repeat it briefly so this stage is
+	# self-contained.
+	if grep -rqs 'CMD_SUSFS_ADD_SUS_PATH' "$KSU_DIR/kernel" 2>/dev/null &&
 	   grep -q 'config KSU_SUSFS$' "$KSU_DIR/kernel/Kconfig" 2>/dev/null; then
-		echo "   -> KernelSU SUSFS glue: provided by the KSU fork itself (no patch needed)"
+		echo "   -> KernelSU SUSFS glue: provided by the KSU source itself (no patch needed)"
 	else
 		fail_critical "the KernelSU source in use has no SUSFS glue (see step 1a)."
 	fi
