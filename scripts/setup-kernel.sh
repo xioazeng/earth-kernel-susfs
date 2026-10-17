@@ -138,6 +138,28 @@ echo
 echo "[1/4] KernelSU ($KSU_REF)"
 KSU_DIR="$KERNEL_ROOT/KernelSU"
 
+# If the kernel tree being built already ships KernelSU (for example a MIUI
+# kernel tree with drivers/kernelsu committed), use that copy untouched. The
+# clone below would otherwise fight with the in-tree sources -- and on such a
+# tree the in-tree copy is the one whose protocol matches the kernel.
+if [ -f "$KERNEL_ROOT/drivers/kernelsu/Kconfig" ] && [ -f "$KERNEL_ROOT/drivers/kernelsu/Makefile" ]; then
+	echo "   -> kernel tree already carries KernelSU (drivers/kernelsu), using it as-is"
+	KSU_SRC="$KERNEL_ROOT/drivers/kernelsu"
+	KSU_DESC="in-tree (from $(basename "$KERNEL_ROOT"))"
+	KSU_SHA=$(git -C "$KERNEL_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)
+	KSU_BRANCH="in-tree"
+	echo "   -> in-tree KernelSU at $KSU_SRC (sha=$KSU_SHA)"
+	# This generation of Makefile derives KSU_VERSION from
+	#     git rev-list --count HEAD
+	# inside the kernel tree, which is meaningless in a shallow CI clone (it
+	# would report 1 => version 10199, i.e. "kernel too old" for the manager).
+	# Pin it to the version of the manager generation known to work here.
+	if grep -q 'eval KSU_VERSION' "$KSU_SRC/Makefile" 2>/dev/null; then
+		sed -i 's|^$(eval KSU_VERSION=.*$|$(eval KSU_VERSION=12701)|' "$KSU_SRC/Makefile"
+		echo "   -> pinned KSU_VERSION=12701 (shallow clone would otherwise report 10199)"
+	fi
+else
+
 if [ -d "$KSU_DIR" ]; then
 	echo "   -> removing pre-existing $KSU_DIR"
 	rm -rf "$KSU_DIR"
@@ -178,6 +200,7 @@ if [ ! -f "$KSU_SRC/Kconfig" ] || [ ! -f "$KSU_SRC/Makefile" ]; then
 else
 	echo "   -> KernelSU sources confirmed ($KSU_SRC)"
 fi
+fi  # end: in-tree KernelSU vs. sparse-cloned KernelSU
 
 # -----------------------------------------------------------------------------
 # 1a) SUSFS preflight.
@@ -317,8 +340,12 @@ if [ ! -f "$KERNEL_ROOT/include/linux/pgtable.h" ]; then
 fi
 
 # Provide the exact paths legacy setup.sh creates.
-ln -sfn "$KSU_SRC" "$KERNEL_ROOT/drivers/kernelsu"
-echo "   -> symlink: drivers/kernelsu -> KernelSU/kernel"
+if [ "$KSU_SRC" = "$KERNEL_ROOT/drivers/kernelsu" ]; then
+	echo "   -> KernelSU already lives at drivers/kernelsu (in-tree), no symlink needed"
+else
+	ln -sfn "$KSU_SRC" "$KERNEL_ROOT/drivers/kernelsu"
+	echo "   -> symlink: drivers/kernelsu -> $KSU_SRC"
+fi
 
 if ! grep -q 'kernelsu' "$KERNEL_ROOT/drivers/Makefile"; then
 	printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >>"$KERNEL_ROOT/drivers/Makefile"
