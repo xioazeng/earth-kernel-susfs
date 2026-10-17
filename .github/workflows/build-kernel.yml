@@ -23,11 +23,11 @@ on:
       kernel_repo:
         description: 'Kernel source repository'
         required: false
-        default: 'LineageOS/android_kernel_xiaomi_earth'
+        default: 'Oscar1640/android_kernel_xiaomi_earth'
       kernel_ref:
         description: 'Kernel branch/tag/commit'
         required: false
-        default: 'lineage-21'
+        default: 'ksu-next'
       defconfig:
         description: 'Defconfig name (without _defconfig)'
         required: false
@@ -118,8 +118,8 @@ jobs:
 
       - name: Checkout kernel source
         run: |
-          git clone --depth 1 --branch "${{ inputs.kernel_ref || 'lineage-21' }}" \
-            "https://github.com/${{ inputs.kernel_repo || 'LineageOS/android_kernel_xiaomi_earth' }}.git" \
+          git clone --depth 1 --branch "${{ inputs.kernel_ref || 'ksu-next' }}" \
+            "https://github.com/${{ inputs.kernel_repo || 'Oscar1640/android_kernel_xiaomi_earth' }}.git" \
             kernel
           echo "KERNEL_SHA=$(git -C kernel rev-parse HEAD)" >> "$GITHUB_ENV"
           echo "kernel HEAD: $(git -C kernel rev-parse --short HEAD)"
@@ -298,8 +298,8 @@ jobs:
             echo ""
             echo "| item | value |"
             echo "|---|---|"
-            echo "| kernel repo | \`${{ inputs.kernel_repo || 'LineageOS/android_kernel_xiaomi_earth' }}\` |"
-            echo "| kernel ref | \`${{ inputs.kernel_ref || 'lineage-21' }}\` |"
+            echo "| kernel repo | \`${{ inputs.kernel_repo || 'Oscar1640/android_kernel_xiaomi_earth' }}\` |"
+            echo "| kernel ref | \`${{ inputs.kernel_ref || 'ksu-next' }}\` |"
             echo "| kernel commit | \`${KERNEL_SHA}\` |"
             echo "| KernelSU | \`${{ inputs.kernelsu_ref || 'ksu-next' }}\` (KernelSU-Next 1.0.x + SUSFS glue) |"
             echo "| SUSFS | \`${{ inputs.susfs_ref || 'kernel-4.19' }}\` (enabled: \`${{ inputs.susfs_enable || '1' }}\`) |"
