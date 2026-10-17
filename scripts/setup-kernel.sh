@@ -149,15 +149,6 @@ if [ -f "$KERNEL_ROOT/drivers/kernelsu/Kconfig" ] && [ -f "$KERNEL_ROOT/drivers/
 	KSU_SHA=$(git -C "$KERNEL_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)
 	KSU_BRANCH="in-tree"
 	echo "   -> in-tree KernelSU at $KSU_SRC (sha=$KSU_SHA)"
-	# This generation of Makefile derives KSU_VERSION from
-	#     git rev-list --count HEAD
-	# inside the kernel tree, which is meaningless in a shallow CI clone (it
-	# would report 1 => version 10199, i.e. "kernel too old" for the manager).
-	# Pin it to the version of the manager generation known to work here.
-	if grep -q 'eval KSU_VERSION' "$KSU_SRC/Makefile" 2>/dev/null; then
-		sed -i 's|^$(eval KSU_VERSION=.*$|$(eval KSU_VERSION=12701)|' "$KSU_SRC/Makefile"
-		echo "   -> pinned KSU_VERSION=12701 (shallow clone would otherwise report 10199)"
-	fi
 else
 
 if [ -d "$KSU_DIR" ]; then
@@ -201,6 +192,17 @@ else
 	echo "   -> KernelSU sources confirmed ($KSU_SRC)"
 fi
 fi  # end: in-tree KernelSU vs. sparse-cloned KernelSU
+
+# This KernelSU generation derives its version from
+#     git rev-list --count HEAD
+# which is meaningless here: with a shallow kernel clone it reports 1 (version
+# 10199 => "kernel too old" for the manager), and when the number comes from the
+# whole kernel history it reports nonsense such as 835856. Pin it to the version
+# of the manager generation that is known to work with this kernel.
+if grep -q 'eval KSU_VERSION' "$KSU_SRC/Makefile" 2>/dev/null; then
+	sed -i 's|^$(eval KSU_VERSION=.*$|$(eval KSU_VERSION=12701)|' "$KSU_SRC/Makefile"
+	echo "   -> pinned KSU_VERSION=12701 (manager v1.0.8 era)"
+fi
 
 # -----------------------------------------------------------------------------
 # 1a) SUSFS preflight.
